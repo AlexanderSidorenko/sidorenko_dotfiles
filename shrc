@@ -1,1 +1,14 @@
 # Run commands that are applicable to both zsh and bash
+
+# ripgrep config
+export RIPGREP_CONFIG_PATH=~/.sidorenko_dotfiles/ripgreprc
+
+# Aliases and functions
+
+# Make less handle colors
+alias less='less -R'
+# ripgrep into less
+rgl()
+{
+    rg $@ | less
+}
