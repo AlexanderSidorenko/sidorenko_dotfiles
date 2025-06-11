@@ -3,6 +3,9 @@
 # ripgrep config
 export RIPGREP_CONFIG_PATH=~/.sidorenko_dotfiles/ripgreprc
 
+# tig config
+export TIGRC_USER=~/.sidorenko_dotfiles/tigrc
+
 # Aliases and functions
 
 # Make less handle colors
