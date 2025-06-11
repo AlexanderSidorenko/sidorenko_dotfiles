@@ -1,0 +1,11 @@
+[user]
+	email = alexander@sidorenko.xyz
+	name = Alexander Sidorenko
+[diff]
+	tool = vimdiff
+[difftool]
+	prompt = false
+[alias]
+	d = difftool
+[difftool "vimdiff"]
+	cmd = vimdiff \"$LOCAL\" \"$REMOTE\"
