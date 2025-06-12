@@ -1,1 +1,2 @@
 bind status C !git commit --verbose
+bind generic    <C-B>   @sh -c "git notes --ref=bplist add -m 'Pick Me!' %(commit) || git notes --ref=bplist remove %(commit)"
