@@ -15,3 +15,5 @@ rgl()
 {
     rg $@ | less
 }
+
+alias cat=batcat
