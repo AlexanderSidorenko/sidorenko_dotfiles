@@ -218,12 +218,27 @@ install_ranger() {
   symlink_prompt "$src" "$dest"
 }
 
+install_mc_keymap() {
+  local mc_dir="${HOME}/.config/mc"
+  local src="${DOTDIR}/mc.keymap"
+  local dest="${mc_dir}/mc.keymap"
+
+  [[ -e "$src" ]] || die "Missing mc keymap: $(name "$src")"
+
+  # Ensure ~/.config/mc is a real directory (not a symlink),
+  # so we don't accidentally write into a symlinked tree.
+  ensure_dir_prompt "$mc_dir" || return 0
+
+  symlink_prompt "$src" "$dest"
+}
+
 main() {
   log "Installing sidorenko_dotfiles from DOTDIR=$(name "$DOTDIR")..."
   ensure_shrc_sources_repo bashrc
   ensure_shrc_sources_repo zshrc
   install_gitconfig
   install_ranger
+  install_mc_keymap
   log "sidorenko_dotfiles successfully installed!"
 }
 

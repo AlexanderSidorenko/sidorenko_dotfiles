@@ -1,0 +1,9 @@
+[panel]
+Sort = alt-!
+SortPrev =
+SortNext =
+SortByMTime =  alt-@
+SortReverse = alt-#
+SortByName = alt-$
+SortByExt = alt+%
+SortBySize = alt-^
