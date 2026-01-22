@@ -1,8 +1,52 @@
+[core]
+    # Use Neovim for commit messages
+    editor = nvim
+    # Use Delta for standard 'git diff' viewing
+    pager = delta
+
+[interactive]
+    # Use Delta for 'git add -p'
+    diffFilter = delta --color-only
+
 [diff]
-	tool = vimdiff
+    # If you explicitly run 'git difftool' (or 'git d'), use Neovim
+    tool = nvimdiff
+    # Helps Delta detect moved blocks of code (better coloring)
+    colorMoved = default
+
 [difftool]
-	prompt = false
+    # Don't ask confirmation before opening Neovim
+    prompt = false
+
+[difftool "nvimdiff"]
+    # Explicitly use Neovim in diff mode
+    cmd = nvim -d "$LOCAL" "$REMOTE"
+
+[merge]
+    # Use Neovim for resolving conflicts ('git mergetool')
+    tool = nvimdiff
+
+[mergetool]
+    # Don't keep .orig backup files after resolving conflicts
+    keepBackup = false
+    # Don't ask confirmation before opening
+    prompt = false
+
 [alias]
-	d = difftool
-[difftool "vimdiff"]
-	cmd = vimdiff \"$LOCAL\" \"$REMOTE\"
+    # 'git d' opens Neovim diff view (interactive)
+    d = difftool
+    
+    # Common shortcuts (optional, but recommended)
+    s = status -sb
+    co = checkout
+    br = branch
+    ci = commit
+    st = status
+
+[delta]
+    # Modern Delta UI settings
+    navigate = true      # use n and N to move between diff sections
+    light = false        # set to true if you use a light terminal theme
+    side-by-side = true  # clearer side-by-side comparison
+    line-numbers = true  # show line numbers
+    syntax-theme = Dracula # Matches modern dark terminals well

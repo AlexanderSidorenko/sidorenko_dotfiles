@@ -232,6 +232,83 @@ install_mc_keymap() {
   symlink_prompt "$src" "$dest"
 }
 
+# Target Keyboard Repeat Settings (Snappy: 150ms delay, 15ms interval)
+TARGET_DELAY_MS=150
+TARGET_SPEED_MS=15
+
+# MacOS uses "ticks" (1 tick = 15ms)
+MAC_TARGET_DELAY=10 # 10 * 15ms = 150ms
+MAC_TARGET_SPEED=1  # 1 * 15ms = 15ms
+
+KEY_REPEAT_CHANGE_MADE=0
+
+# Function to check and set macOS key repeat values
+configure_key_repeat_macos() {
+  # Check Accent Menu (Default is enabled/missing. We want it disabled 'false' or '0')
+  CURRENT_PRESSHOLD=$(defaults read -g ApplePressAndHoldEnabled 2>/dev/null)
+  if [[ "$CURRENT_PRESSHOLD" != "0" && "$CURRENT_PRESSHOLD" != "false" ]]; then
+    defaults write -g ApplePressAndHoldEnabled -bool false
+    KEY_REPEAT_CHANGE_MADE=1
+  fi
+
+  # Check Initial Delay
+  CURRENT_DELAY=$(defaults read -g InitialKeyRepeat 2>/dev/null)
+  if [[ "$CURRENT_DELAY" != "$MAC_TARGET_DELAY" ]]; then
+    defaults write -g InitialKeyRepeat -int $MAC_TARGET_DELAY
+    KEY_REPEAT_CHANGE_MADE=1
+  fi
+
+  # Check Repeat Speed
+  CURRENT_SPEED=$(defaults read -g KeyRepeat 2>/dev/null)
+  if [[ "$CURRENT_SPEED" != "$MAC_TARGET_SPEED" ]]; then
+    defaults write -g KeyRepeat -int $MAC_TARGET_SPEED
+    KEY_REPEAT_CHANGE_MADE=1
+  fi
+}
+
+# Function to check and set Ubuntu (GNOME) key repeat values
+configure_key_repeat_ubuntu() {
+  if ! command -v gsettings &>/dev/null; then
+    warn "Error: gsettings not found. Requires standard GNOME environment."
+    exit 1
+  fi
+
+  # Check Delay (Strip 'uint32' if present)
+  CURRENT_DELAY=$(gsettings get org.gnome.desktop.peripherals.keyboard delay | tr -cd '0-9')
+  if [[ "$CURRENT_DELAY" != "$TARGET_DELAY_MS" ]]; then
+    gsettings set org.gnome.desktop.peripherals.keyboard delay $TARGET_DELAY_MS
+    KEY_REPEAT_CHANGE_MADE=1
+  fi
+
+  # Check Speed (Strip 'uint32' if present)
+  CURRENT_SPEED=$(gsettings get org.gnome.desktop.peripherals.keyboard repeat-interval | tr -cd '0-9')
+  if [[ "$CURRENT_SPEED" != "$TARGET_SPEED_MS" ]]; then
+    gsettings set org.gnome.desktop.peripherals.keyboard repeat-interval $TARGET_SPEED_MS
+    KEY_REPEAT_CHANGE_MADE=1
+  fi
+}
+
+make_keyboard_snappy() {
+  log "Configuring keyboard to be snappy..."
+
+  # Detect OS and Run
+  if [[ "$(uname)" == "Darwin" ]]; then
+    configure_key_repeat_macos
+  elif [[ "$(uname)" == "Linux" ]]; then
+    configure_key_repeat_ubuntu
+  else
+    warn "Unsupported Operating System."
+    exit 1
+  fi
+
+  # Final Output
+  if [[ "$KEY_REPEAT_CHANGE_MADE" -eq 1 ]]; then
+    log "Settings updated. Please restart your user session for changes to take effect."
+  else
+    log "Settings already configured to snappy standards. No changes made."
+  fi
+}
+
 main() {
   log "Installing sidorenko_dotfiles from DOTDIR=$(name "$DOTDIR")..."
   ensure_shrc_sources_repo bashrc
@@ -239,6 +316,7 @@ main() {
   install_gitconfig
   install_ranger
   install_mc_keymap
+  make_keyboard_snappy
   symlink_prompt "${DOTDIR}/nvim" "${HOME}/.config/nvim"
   log "sidorenko_dotfiles successfully installed!"
 }

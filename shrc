@@ -1,28 +1,23 @@
-# Run commands that are applicable to both zsh and bash
+# =============================================================================
+# SHELL CONFIGURATION (ZSH & BASH)
+# =============================================================================
 
-# ripgrep config
-export RIPGREP_CONFIG_PATH=~/.sidorenko_dotfiles/ripgreprc
-
-# tig config
-export TIGRC_USER=~/.sidorenko_dotfiles/tigrc
-
-# Aliases and functions
-
-# Batteries-included Bash config: history hygiene, safer defaults, rich prompt,
-# lots of aliases/functions, and optional integrations (git/fzf/k8s/docker/etc).
-# -----------------------------------------------------------------------------
-
-# If not running interactively, don't do anything.
+# Return immediately if the shell is not interactive (e.g., scp or scripts)
 [[ $- != *i* ]] && return
 
 # =============================================================================
-# 0) Baseline sanity / environment
+# ENVIRONMENT VARIABLES
 # =============================================================================
 
+# Set the default language and character encoding to UTF-8
 export LANG="${LANG:-en_US.UTF-8}"
 export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 
-# Prefer vi-family editors (per your request: vi instead of nano)
+# Define the location for custom tool configurations
+export RIPGREP_CONFIG_PATH=~/.sidorenko_dotfiles/ripgreprc
+export TIGRC_USER=~/.sidorenko_dotfiles/tigrc
+
+# Editor selection logic: prefer Neovim, then Vim, then Vi
 if command -v nvim >/dev/null 2>&1; then
   export EDITOR="nvim"
 elif command -v vim >/dev/null 2>&1; then
@@ -32,58 +27,237 @@ else
 fi
 export VISUAL="$EDITOR"
 
-export PAGER="${PAGER:-less}"
-
-# Less defaults: friendly paging, keep colors, don't wipe screen on exit
-export LESS="-FRSXMK"
-export LESSHISTFILE="-"
-export MANPAGER="less -FRSXMK"
-
-# Safer default file perms
+# Set default file permissions (755 for dirs, 644 for files)
 umask 022
 
-# Detect OS
+# Detect macOS for specific alias handling
 __is_macos=false
 [[ "$OSTYPE" == "darwin"* ]] && __is_macos=true
 
 # =============================================================================
-# 1) Bash behavior tweaks
+# SHELL SPECIFIC LOGIC
 # =============================================================================
-shopt -s autocd               # type a dir name to cd into it
-shopt -s cdspell              # minor cd typos
-shopt -s checkwinsize         # update LINES/COLUMNS after each command
-shopt -s cmdhist              # multi-line cmds in one history entry
-shopt -s histappend           # append to history file, don't overwrite
-shopt -s globstar             # ** recursive globs
-shopt -s extglob              # extended globbing
-shopt -s nocaseglob           # case-insensitive globbing
-shopt -s direxpand            # expand ~ and vars during completion
-shopt -s expand_aliases
 
-# Completion / readline niceties
-bind "set completion-ignore-case on"
-bind "set show-all-if-ambiguous on"
-bind "set mark-symlinked-directories on"
-bind '"\e[A": history-search-backward'
-bind '"\e[B": history-search-forward'
+if [ -n "$ZSH_VERSION" ]; then
+    # -------------------------------------------------------------------------
+    # ZSH CONFIGURATION
+    # -------------------------------------------------------------------------
+
+    # --- Options ---
+    setopt autocd                   # Change directory just by typing the name
+    setopt correct                  # Auto-correct spelling mistakes in commands
+    setopt extended_glob            # Enable advanced globbing (like ^ for negation)
+    setopt interactive_comments     # Allow comments (#) in interactive shell line
+    unsetopt case_glob              # Ignore case when using glob patterns
+    unsetopt beep                   # Disable the bell globally (silence)
+    unsetopt list_beep              # Disable the bell specifically for ambiguous completion
+
+    # --- History (Zsh Native) ---
+    export HISTSIZE=200000
+    export SAVEHIST=400000
+    export HISTFILE="${HOME}/.zsh_history"
+    setopt append_history           # Append to history file instead of overwriting
+    setopt inc_append_history       # Write to file immediately after execution
+    setopt share_history            # Share history instantly between running sessions
+    setopt hist_ignore_all_dups     # Remove older duplicate entries from history
+    setopt hist_ignore_space        # Ignore commands starting with a space
+    setopt hist_reduce_blanks       # Trim extra spaces before recording
+    setopt hist_verify              # Show command to user before running history expansion
+
+    # Match Bash's HISTIGNORE behavior (don't save common short commands)
+    zshaddhistory() {
+        emulate -L zsh
+        local line=${1%%$'\n'}
+        # List of commands to ignore
+        [[ "$line" == "ls" ]] && return 1
+        [[ "$line" == "l" ]] && return 1
+        [[ "$line" == "ll" ]] && return 1
+        [[ "$line" == "la" ]] && return 1
+        [[ "$line" == "pwd" ]] && return 1
+        [[ "$line" == "cd" ]] && return 1
+        [[ "$line" == "cd -" ]] && return 1
+        [[ "$line" == "exit" ]] && return 1
+        [[ "$line" == "clear" ]] && return 1
+        [[ "$line" == "history" ]] && return 1
+        return 0
+    }
+
+    # --- Completion ---
+    autoload -Uz compinit && compinit
+    
+    # Enable case-insensitive completion
+    zstyle ':completion:*' matcher-list 'm:{a-z}={A-Za-z}'
+    # Enable a selection menu for ambiguous options
+    zstyle ':completion:*' menu select
+    # Allow variable expansion during completion
+    setopt glob_complete
+    # Sort files by name and mark symlinked dirs with a slash
+    zstyle ':completion:*' file-sort name
+
+    # --- Key Bindings ---
+    bindkey -e  # Emacs mode
+    
+    # History search based on current input
+    autoload -U up-line-or-beginning-search
+    autoload -U down-line-or-beginning-search
+    zle -N up-line-or-beginning-search
+    zle -N down-line-or-beginning-search
+    
+    bindkey "^[[A" up-line-or-beginning-search
+    bindkey "^[[B" down-line-or-beginning-search
+
+    # --- Prompt (Zsh Native) ---
+    setopt prompt_subst
+    
+    # Set window title
+    precmd() { print -Pn "\e]0;%n@%m: %~\a"; }
+    
+    # Structure: [ExitCode] User@Host Path
+    # Colors: User=BoldGreen, Host=BoldBlue, Path=Cyan, Exit=Red
+    # Path: %3~ means "show last 3 directories" (matches Bash PROMPT_DIRTRIM=3)
+    local exit_code="%(?::%B%F{red}✘%?%f%b )"
+    PS1="${exit_code}%B%F{green}%n%f%b@%B%F{blue}%m%f%b %F{cyan}%3~%f"$'\n'"%B$ %b"
+
+    # --- Integrations ---
+    # Load kubectl completion
+    if command -v kubectl >/dev/null 2>&1; then
+        source <(kubectl completion zsh)
+    fi
+
+    # Load direnv
+    if command -v direnv >/dev/null 2>&1; then
+        eval "$(direnv hook zsh)"
+    fi
+
+    # Load zoxide
+    if command -v zoxide >/dev/null 2>&1; then
+        eval "$(zoxide init zsh)"
+    fi
+
+    # Load FZF
+    if command -v fzf >/dev/null 2>&1; then
+        for dir in /usr/share/fzf /usr/local/opt/fzf/shell /opt/homebrew/opt/fzf/shell /usr/share/doc/fzf/examples; do
+            [[ -r "$dir/key-bindings.zsh" ]] && source "$dir/key-bindings.zsh"
+            [[ -r "$dir/completion.zsh" ]] && source "$dir/completion.zsh"
+        done
+    fi
+
+elif [ -n "$BASH_VERSION" ]; then
+    # -------------------------------------------------------------------------
+    # BASH CONFIGURATION
+    # -------------------------------------------------------------------------
+
+    # --- Options ---
+    shopt -s autocd                 # Change directory by typing directory name
+    shopt -s cdspell                # Auto-correct minor directory typos
+    shopt -s checkwinsize           # Update window size after command execution
+    shopt -s cmdhist                # Save multi-line commands as single history entry
+    shopt -s histappend             # Append to history file, don't overwrite
+    shopt -s globstar               # Enable recursive globbing with **
+    shopt -s extglob                # Enable extended globbing patterns
+    shopt -s nocaseglob             # Case-insensitive globbing
+    shopt -s direxpand              # Expand variables during path completion
+    shopt -s expand_aliases         # Expand aliases in non-interactive shells
+
+    # --- History (Bash Native) ---
+    export HISTSIZE=200000
+    export HISTFILESIZE=400000
+    export HISTCONTROL=ignoreboth:erasedups
+    # Ignore specific short commands
+    export HISTIGNORE="&:ls:l:ll:la:pwd:cd:cd -:exit:clear:history"
+    export HISTTIMEFORMAT='%F %T  '
+    
+    # Sync history between terminals
+    __bash_save_history() {
+        history -a
+        history -n
+    }
+
+    # --- Completion & Readline ---
+    bind "set completion-ignore-case on"
+    bind "set show-all-if-ambiguous on"
+    bind "set mark-symlinked-directories on"
+    
+    # History search based on current input
+    bind '"\e[A": history-search-backward'
+    bind '"\e[B": history-search-forward'
+
+    # Load bash_completion
+    if [[ -r /usr/share/bash-completion/bash_completion ]]; then
+        source /usr/share/bash-completion/bash_completion
+    elif [[ -r /usr/local/etc/bash_completion ]]; then
+        source /usr/local/etc/bash_completion
+    fi
+    complete -cf sudo 2>/dev/null || true
+
+    # --- Prompt (Bash Native) ---
+    # Trim directory path to last 3 elements
+    export PROMPT_DIRTRIM=3
+
+    __prompt_build() {
+        local ec=$?
+        local reset="\[\e[0m\]"
+        local bold="\[\e[1m\]"
+        local red="\[\e[1;31m\]"
+        local green="\[\e[1;32m\]" # Bold Green
+        local blue="\[\e[1;34m\]"  # Bold Blue
+        local cyan="\[\e[36m\]"    # Cyan (non-bold to match Zsh defaults usually)
+        local host="${HOSTNAME%%.*}"
+
+        # Window title
+        printf '\e]0;%s@%s: %s\a' "$USER" "$host" "${PWD/#$HOME/~}"
+
+        # Exit code
+        local ec_part=""
+        if (( ec != 0 )); then
+            ec_part="${red}✘${ec}${reset} "
+        fi
+
+        # Structure: [ExitCode] User@Host Path
+        # Note: \u matches %n, \h matches %m, \w matches %3~ (due to PROMPT_DIRTRIM)
+        PS1="${ec_part}${green}\u${reset}@${blue}${host}${reset} ${cyan}\w${reset}\n${bold}\$ ${reset}"
+    }
+
+    __prompt_command() {
+        __bash_save_history
+        __prompt_build
+    }
+    PROMPT_COMMAND="__prompt_command"
+
+    # --- Integrations ---
+    # Load kubectl completion
+    if command -v kubectl >/dev/null 2>&1; then
+        source <(kubectl completion bash) 2>/dev/null || true
+    fi
+
+    # Load direnv
+    if command -v direnv >/dev/null 2>&1; then
+        eval "$(direnv hook bash)"
+    fi
+
+    # Load zoxide
+    if command -v zoxide >/dev/null 2>&1; then
+        eval "$(zoxide init bash)"
+    fi
+
+    # Load FZF
+    if command -v fzf >/dev/null 2>&1; then
+        for dir in /usr/share/fzf /usr/local/opt/fzf/shell /opt/homebrew/opt/fzf/shell /usr/share/doc/fzf/examples; do
+            [[ -r "$dir/key-bindings.bash" ]] && source "$dir/key-bindings.bash"
+            [[ -r "$dir/completion.bash" ]] && source "$dir/completion.bash"
+        done
+        
+        # FZF-powered cd
+        fcd() {
+            local dir
+            dir="$(find . -type d -not -path '*/.git/*' 2>/dev/null | fzf +m)" || return
+            cd -- "$dir" || return
+        }
+    fi
+fi
 
 # =============================================================================
-# 2) History settings
-# =============================================================================
-export HISTSIZE=200000
-export HISTFILESIZE=400000
-export HISTCONTROL=ignoreboth:erasedups
-export HISTIGNORE="&:ls:l:ll:la:pwd:cd:cd -:exit:clear:history"
-export HISTTIMEFORMAT='%F %T  '
-
-# Save + merge history across terminals on every prompt
-__bash_save_history() {
-  history -a     # append new lines from this session
-  history -n     # read new lines added by other sessions
-}
-
-# =============================================================================
-# 3) PATH management
+# PATH MANAGEMENT
 # =============================================================================
 path_prepend() { [[ -d "$1" ]] && PATH="$1:${PATH}"; }
 path_append()  { [[ -d "$1" ]] && PATH="${PATH}:$1"; }
@@ -100,19 +274,17 @@ if $__is_macos; then
   [[ -d "/opt/homebrew/bin" ]] && path_prepend "/opt/homebrew/bin"
   [[ -d "/usr/local/bin" ]] && path_prepend "/usr/local/bin"
 fi
-
 export PATH
-
 ppath() { tr ':' '\n' <<<"$PATH" | nl -ba; }
 
 # =============================================================================
-# 4) Colors + pager cosmetics
+# COLORS AND COSMETICS
 # =============================================================================
 if command -v dircolors >/dev/null 2>&1; then
   eval "$(dircolors -b 2>/dev/null || true)"
 fi
 
-# Make man/less headings readable
+# Man page colors (Used by less/bat)
 export LESS_TERMCAP_mb=$'\e[1;31m'
 export LESS_TERMCAP_md=$'\e[1;36m'
 export LESS_TERMCAP_me=$'\e[0m'
@@ -122,93 +294,55 @@ export LESS_TERMCAP_ue=$'\e[0m'
 export LESS_TERMCAP_us=$'\e[1;32m'
 
 # =============================================================================
-# 5) ls/grep defaults + modern tool fallbacks
+# ALIASES & MODERN REPLACEMENTS
 # =============================================================================
 
-# ls coloring (GNU vs BSD)
-if ls --color=auto >/dev/null 2>&1; then
-  alias ls='ls --color=auto'
-elif $__is_macos; then
-  alias ls='ls -G'
-fi
-
-alias ll='ls -alF'
-alias la='ls -A'
-alias l='ls -CF'
-
-# Keep grep available as grep; prefer ripgrep via rg/rgf helpers
-alias grep='grep --color=auto'
-alias egrep='egrep --color=auto'
-alias fgrep='fgrep --color=auto'
-
-# Optional modern replacements (only if installed)
+# LS: Use 'eza' if available, otherwise colorize 'ls'
 if command -v eza >/dev/null 2>&1; then
   alias ls='eza --group-directories-first'
   alias ll='eza -lah --group-directories-first'
   alias la='eza -a --group-directories-first'
   alias l='eza -F --group-directories-first'
+elif ls --color=auto >/dev/null 2>&1; then
+  alias ls='ls --color=auto'
+  alias ll='ls -alF'
+  alias la='ls -A'
+  alias l='ls -CF'
+elif $__is_macos; then
+  alias ls='ls -G'
+  alias ll='ls -alF'
+  alias la='ls -A'
+  alias l='ls -CF'
 fi
 
+# CAT: Use 'bat' if available
 if command -v bat >/dev/null 2>&1; then
   alias cat='bat -p'
-  alias less='bat --paging=always'
-  export BAT_PAGER="less -FRSXMK"
 fi
 
-# =============================================================================
-# 6) Prompt (2 lines, git branch, exit code)
-# =============================================================================
-export PROMPT_DIRTRIM=3
+# GREP: Always colorize
+alias grep='grep --color=auto'
+alias egrep='egrep --color=auto'
+alias fgrep='fgrep --color=auto'
 
-__git_branch() {
-  command -v git >/dev/null 2>&1 || return 0
-  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
-  local b
-  b="$(git symbolic-ref --quiet --short HEAD 2>/dev/null \
-      || git rev-parse --short HEAD 2>/dev/null)" || return 0
-  printf "%s" "$b"
-}
+# PAGER: Prioritize 'moar', fallback to 'bat', default to 'less'
+if command -v moar >/dev/null 2>&1; then
+  # MOAR: Modern, colorful, handles man pages natively
+  export PAGER="moar"
+  export MANPAGER="moar"
+  export MOAR="--no-linenumbers --statusbar=bold"
+  alias less='moar'
+elif command -v bat >/dev/null 2>&1; then
+  # BAT: Can act as a pager for man pages
+  alias less='bat --paging=always'
+  export BAT_PAGER="less -FRSXMK"
+  export MANPAGER="sh -c 'col -bx | bat -l man -p'" 
+else
+  # LESS: Default settings defined at top of file
+  export PAGER="less"
+fi
 
-__prompt_title() {
-  printf "\[\e]0;%s@%s: %s\a\]" "$USER" "${HOSTNAME%%.*}" "${PWD/#$HOME/~}"
-}
-
-__prompt_build() {
-  local ec=$?  # exit code of last command (capture immediately)
-
-  local reset="\[\e[0m\]"
-  local bold="\[\e[1m\]"
-  local dim="\[\e[2m\]"
-  local red="\[\e[1;31m\]"
-  local green="\[\e[32m\]"
-  local blue="\[\e[34m\]"
-  local cyan="\[\e[36m\]"
-  local yellow="\[\e[33m\]"
-
-  local host="${HOSTNAME%%.*}"
-  local cwd="\w"
-
-  local ec_part=""
-  if (( ec != 0 )); then
-    ec_part="${red}✘${ec}${reset} "
-  fi
-
-  local gb=""
-  local b="$(__git_branch)"
-  [[ -n "$b" ]] && gb=" ${yellow}git:${b}${reset}"
-
-  PS1="$(__prompt_title)${ec_part}${bold}${green}\u${reset}${dim}@${reset}${bold}${blue}${host}${reset} ${cyan}${cwd}${reset}${gb}\n${bold}\$ ${reset}"
-}
-
-__prompt_command() {
-  __bash_save_history
-  __prompt_build
-}
-PROMPT_COMMAND="__prompt_command"
-
-# =============================================================================
-# 7) Convenience aliases (safe defaults)
-# =============================================================================
+# Shortcuts
 alias c='clear'
 alias h='history'
 alias j='jobs -l'
@@ -225,11 +359,19 @@ alias mkdir='mkdir -pv'
 alias ebashrc='$EDITOR ~/.bashrc'
 alias sbashrc='source ~/.bashrc'
 
-# Process shortcuts (ripgrep-first)
+alias ..='cd ..'
+alias ...='cd ../..'
+alias ....='cd ../../..'
+alias sl='ls'
+alias grpe='grep'
+alias please='sudo $(fc -ln -1)'
+
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
 psg() { ps aux | rg -i -- "$*"; }
 top10() { ps aux --sort=-%mem | head -n 11; }
-
-# Networking
 myip() { curl -fsSL https://ifconfig.me 2>/dev/null || curl -fsSL https://api.ipify.org; }
 pingg() { ping -c 5 8.8.8.8; }
 
@@ -244,20 +386,12 @@ ports() {
   fi
 }
 
-# systemd journal convenience
 if command -v journalctl >/dev/null 2>&1; then
   alias jctl='journalctl -xe --no-pager'
 fi
 
-# =============================================================================
-# 8) Functions toolbox
-# =============================================================================
 mkcd() { mkdir -p -- "$1" && cd -- "$1"; }
-
-# cd to file's directory
 cdf() { cd -- "$(dirname -- "$1")"; }
-
-# Go up N directories: up 3
 up() { local n=${1:-1}; while (( n-- > 0 )); do cd .. || return; done; }
 
 extract() {
@@ -302,7 +436,6 @@ timer() {
   return $ec
 }
 
-# git root cd
 cgr() {
   command -v git >/dev/null 2>&1 || return 1
   local root
@@ -310,7 +443,6 @@ cgr() {
   cd "$root" || return
 }
 
-# Pretty JSON: uses jq if available, else python
 pj() {
   if command -v jq >/dev/null 2>&1; then
     jq .
@@ -319,7 +451,6 @@ pj() {
   fi
 }
 
-# Ripgrep helper: hidden + follow symlinks, ignore .git
 rgf() {
   if command -v rg >/dev/null 2>&1; then
     rg --hidden --follow --smart-case --glob '!.git/' "$@"
@@ -329,7 +460,6 @@ rgf() {
   fi
 }
 
-# who is using this port?
 whop() {
   local port="$1"
   [[ -n "$port" ]] || { echo "usage: whop <port>" >&2; return 2; }
@@ -343,7 +473,6 @@ whop() {
   fi
 }
 
-# kill process by pattern (fzf if present)
 fkill() {
   local pat="${1:-}"
   [[ -n "$pat" ]] || { echo "usage: fkill <pattern>" >&2; return 2; }
@@ -356,7 +485,7 @@ fkill() {
 }
 
 # =============================================================================
-# 9) Git helpers
+# GIT ALIASES
 # =============================================================================
 if command -v git >/dev/null 2>&1; then
   alias g='git'
@@ -383,7 +512,6 @@ if command -v git >/dev/null 2>&1; then
   alias grh='git reset --hard'
   alias gclean='git clean -xfd'
 
-  # If you have delta installed, it makes diffs much nicer
   if command -v delta >/dev/null 2>&1; then
     export GIT_PAGER="delta"
   else
@@ -392,7 +520,7 @@ if command -v git >/dev/null 2>&1; then
 fi
 
 # =============================================================================
-# 10) Docker / kubectl / terraform (only if installed)
+# TOOL ALIASES (DOCKER / K8S / TERRAFORM)
 # =============================================================================
 if command -v docker >/dev/null 2>&1; then
   alias d='docker'
@@ -421,78 +549,8 @@ if command -v terraform >/dev/null 2>&1; then
 fi
 
 # =============================================================================
-# 11) Completion
-# =============================================================================
-if [[ -r /usr/share/bash-completion/bash_completion ]]; then
-  source /usr/share/bash-completion/bash_completion
-elif [[ -r /usr/local/etc/bash_completion ]]; then
-  source /usr/local/etc/bash_completion
-fi
-
-complete -cf sudo 2>/dev/null || true
-
-if command -v kubectl >/dev/null 2>&1; then
-  source <(kubectl completion bash) 2>/dev/null || true
-fi
-
-# =============================================================================
-# 12) fzf integration (if installed)
-# =============================================================================
-if command -v fzf >/dev/null 2>&1; then
-  # Common locations across distros/homebrew
-  [[ -r /usr/share/fzf/key-bindings.bash ]] && source /usr/share/fzf/key-bindings.bash
-  [[ -r /usr/share/fzf/completion.bash ]] && source /usr/share/fzf/completion.bash
-  [[ -r /usr/share/doc/fzf/examples/key-bindings.bash ]] && source /usr/share/doc/fzf/examples/key-bindings.bash
-  [[ -r /usr/share/doc/fzf/examples/completion.bash ]] && source /usr/share/doc/fzf/examples/completion.bash
-  [[ -r /opt/homebrew/opt/fzf/shell/key-bindings.bash ]] && source /opt/homebrew/opt/fzf/shell/key-bindings.bash
-  [[ -r /opt/homebrew/opt/fzf/shell/completion.bash ]] && source /opt/homebrew/opt/fzf/shell/completion.bash
-  [[ -r /usr/local/opt/fzf/shell/key-bindings.bash ]] && source /usr/local/opt/fzf/shell/key-bindings.bash
-  [[ -r /usr/local/opt/fzf/shell/completion.bash ]] && source /usr/local/opt/fzf/shell/completion.bash
-
-  # fzf-powered cd
-  fcd() {
-    local dir
-    dir="$(find . -type d -not -path '*/.git/*' 2>/dev/null | fzf +m)" || return
-    cd -- "$dir" || return
-  }
-fi
-
-# =============================================================================
-# 13) Optional: direnv / zoxide / starship
-# =============================================================================
-if command -v direnv >/dev/null 2>&1; then
-  eval "$(direnv hook bash)"
-fi
-
-if command -v zoxide >/dev/null 2>&1; then
-  eval "$(zoxide init bash)"
-  # If you want zoxide to replace cd, uncomment:
-  # alias cd='z'
-fi
-
-# Starship prompt (overrides PS1 above)
-# if command -v starship >/dev/null 2>&1; then
-#   eval "$(starship init bash)"
-# fi
-
-# =============================================================================
-# 14) SSH / GPG niceties
+# GPG & LOCAL CONFIG
 # =============================================================================
 export GPG_TTY="$(tty 2>/dev/null || true)"
 
-# =============================================================================
-# 15) Quality-of-life: oops + shortcuts
-# =============================================================================
-alias ..='cd ..'
-alias ...='cd ../..'
-alias ....='cd ../../..'
-alias sl='ls'
-alias grpe='grep'
-
-# Re-run last command with sudo (best-effort; quoting can be imperfect)
-alias please='sudo $(history -p !!)'
-
-# =============================================================================
-# 16) Local overrides
-# =============================================================================
 [[ -r "$HOME/.bashrc.local" ]] && source "$HOME/.bashrc.local"
