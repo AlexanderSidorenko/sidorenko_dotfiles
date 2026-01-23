@@ -180,6 +180,84 @@ fi
 EOF
 }
 
+ensure_bash_profile_sources_bashrc() {
+  local user_profile="${HOME}/.bash_profile"
+
+  # Prompt before replacing unexpected path types (e.g., dir or device file).
+  if [[ -e "$user_profile" && ! -f "$user_profile" && ! -L "$user_profile" ]]; then
+    if confirm_override "$user_profile"; then
+      log "Removing: $(name "$user_profile")"
+      rm_path "$user_profile"
+    else
+      log "Skipped $(name "$user_profile") setup"
+      return 0
+    fi
+  fi
+
+  touch "$user_profile"
+
+  if grep -qE '^[[:space:]]*(source|\.)[[:space:]]+~/.bashrc([[:space:]]|$)' "$user_profile"; then
+    log "$(name "$user_profile") already sources .bashrc"
+    return 0
+  fi
+
+  local begin="# >>> sidorenko_dotfiles.bash_profile >>>"
+  if grep -qF "$begin" "$user_profile"; then
+    log "$(name "$user_profile") already includes sidorenko_dotfiles bash_profile block"
+    return 0
+  fi
+
+  log "Appending .bashrc source block to $(name "$user_profile")"
+  cat >>"$user_profile" <<'EOF'
+
+# >>> sidorenko_dotfiles.bash_profile >>>
+# Auto-added by $HOME/.sidorenko_dotfiles/install.sh
+if [ -r ~/.bashrc ]; then
+  . ~/.bashrc
+fi
+# <<< sidorenko_dotfiles.bash_profile <<<
+EOF
+}
+
+ensure_zprofile_sources_zshrc() {
+  local user_profile="${HOME}/.zprofile"
+
+  # Prompt before replacing unexpected path types (e.g., dir or device file).
+  if [[ -e "$user_profile" && ! -f "$user_profile" && ! -L "$user_profile" ]]; then
+    if confirm_override "$user_profile"; then
+      log "Removing: $(name "$user_profile")"
+      rm_path "$user_profile"
+    else
+      log "Skipped $(name "$user_profile") setup"
+      return 0
+    fi
+  fi
+
+  touch "$user_profile"
+
+  if grep -qE '^[[:space:]]*(source|\.)[[:space:]]+~/.zshrc([[:space:]]|$)' "$user_profile"; then
+    log "$(name "$user_profile") already sources .zshrc"
+    return 0
+  fi
+
+  local begin="# >>> sidorenko_dotfiles.zprofile >>>"
+  if grep -qF "$begin" "$user_profile"; then
+    log "$(name "$user_profile") already includes sidorenko_dotfiles zprofile block"
+    return 0
+  fi
+
+  log "Appending .zshrc source block to $(name "$user_profile")"
+  cat >>"$user_profile" <<'EOF'
+
+# >>> sidorenko_dotfiles.zprofile >>>
+# Auto-added by $HOME/.sidorenko_dotfiles/install.sh
+if [ -r ~/.zshrc ]; then
+  . ~/.zshrc
+fi
+# <<< sidorenko_dotfiles.zprofile <<<
+EOF
+}
+
 install_gitconfig() {
   local repo_gitconfig="${DOTDIR}/gitconfig"
   local repo_gitconfig_personal="${DOTDIR}/gitconfig.personal"
@@ -375,7 +453,9 @@ make_keyboard_snappy() {
 main() {
   log "Installing sidorenko_dotfiles from DOTDIR=$(name "$DOTDIR")..."
   ensure_shrc_sources_repo bashrc
+  ensure_bash_profile_sources_bashrc
   ensure_shrc_sources_repo zshrc
+  ensure_zprofile_sources_zshrc
   install_gitconfig
   install_font_droidsans_nerd
   install_ranger
