@@ -239,6 +239,7 @@ main() {
   install_gitconfig
   install_ranger
   install_mc_keymap
+  symlink_prompt "${DOTDIR}/nvim" "${HOME}/.config/nvim"
   log "sidorenko_dotfiles successfully installed!"
 }
 
