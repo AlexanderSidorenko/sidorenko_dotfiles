@@ -24,7 +24,7 @@ confirm_override() {
   local target="$1"
   local reply
 
-  local prompt="${C_GREEN}[sidorenko_dotfiles] '${C_BLUE}${target}${C_GREEN}' exists. Override? [Y/n] ${C_RESET}"
+  local prompt="${C_GREEN}[sidorenko_dotfiles] ${C_BLUE}${target}${C_GREEN} exists. Override? [Y/n] ${C_RESET}"
   read -r -p "$prompt" reply || true
   reply="${reply:-Y}"
 
@@ -117,6 +117,28 @@ symlink_prompt() {
   log "Linked: $(name "$dest") -> $(name "$src")"
 }
 
+copy_prompt() {
+  # Copy src -> dest (prompt before replacing).
+  local src="$1"
+  local dest="$2"
+
+  [[ -e "$src" ]] || die "Source does not exist: $(name "$src")"
+  ensure_parent_dir "$dest"
+
+  if [[ -e "$dest" || -L "$dest" ]]; then
+    if confirm_override "$dest"; then
+      log "Removing: $(name "$dest")"
+      rm_path "$dest"
+    else
+      log "Skipped: $(name "$dest")"
+      return 0
+    fi
+  fi
+
+  cp -f "$src" "$dest"
+  log "Copied: $(name "$dest")"
+}
+
 ensure_shrc_sources_repo() {
   # Usage: ensure_rc_sources_repo bashrc
   local rc="$1"
@@ -126,7 +148,7 @@ ensure_shrc_sources_repo() {
   [[ -n "$rc" ]] || die "ensure_rc_sources_repo: missing rc name"
   [[ -e "$repo_fragment" ]] || die "Missing repo fragment: $(name "$repo_fragment")"
 
-  # If ~/.<rc> exists but isn't a file/symlink, prompt to replace.
+  # Prompt before replacing unexpected path types (e.g., dir or device file).
   if [[ -e "$user_rc" && ! -f "$user_rc" && ! -L "$user_rc" ]]; then
     if confirm_override "$user_rc"; then
       log "Removing: $(name "$user_rc")"
@@ -232,6 +254,47 @@ install_mc_keymap() {
   symlink_prompt "$src" "$dest"
 }
 
+install_wezterm() {
+  local wezterm_dir="${HOME}/.config/wezterm"
+  local src="${DOTDIR}/wezterm/wezterm.lua"
+  local dest="${wezterm_dir}/wezterm.lua"
+
+  [[ -e "$src" ]] || die "Missing wezterm config: $(name "$src")"
+
+  ensure_dir_prompt "$wezterm_dir" || return 0
+  symlink_prompt "$src" "$dest"
+}
+
+install_font_droidsans_nerd() {
+  local src="${DOTDIR}/DroidSansMNerdFont-Regular.otf"
+  local font_dir
+  local dest
+
+  [[ -e "$src" ]] || die "Missing font: $(name "$src")"
+
+  if [[ "$(uname)" == "Darwin" ]]; then
+    font_dir="${HOME}/Library/Fonts"
+  elif [[ "$(uname)" == "Linux" ]]; then
+    font_dir="${HOME}/.local/share/fonts"
+  else
+    warn "Unsupported Operating System for font install."
+    return 0
+  fi
+
+  ensure_dir_prompt "$font_dir" || return 0
+  dest="${font_dir}/$(basename "$src")"
+  if [[ -f "$dest" ]] && cmp -s "$src" "$dest"; then
+    log "Font already installed: $(name "$dest")"
+    return 0
+  fi
+  copy_prompt "$src" "$dest"
+
+  if [[ "$(uname)" == "Linux" ]] && command -v fc-cache &>/dev/null; then
+    log "Updating font cache..."
+    fc-cache -f "$font_dir" >/dev/null 2>&1 || true
+  fi
+}
+
 # Target Keyboard Repeat Settings (Snappy: 150ms delay, 15ms interval)
 TARGET_DELAY_MS=150
 TARGET_SPEED_MS=15
@@ -314,8 +377,10 @@ main() {
   ensure_shrc_sources_repo bashrc
   ensure_shrc_sources_repo zshrc
   install_gitconfig
+  install_font_droidsans_nerd
   install_ranger
   install_mc_keymap
+  install_wezterm
   make_keyboard_snappy
   symlink_prompt "${DOTDIR}/nvim" "${HOME}/.config/nvim"
   log "sidorenko_dotfiles successfully installed!"
