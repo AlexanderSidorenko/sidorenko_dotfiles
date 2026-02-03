@@ -33,4 +33,8 @@ vim.g.snacks_animate = false
 if vim.g.neovide then
   vim.o.guifont = "DroidSansM Nerd Font:h14"
   vim.g.neovide_scale_factor = 1.0
+
+  vim.g.neovide_position_animation_length = 0
+  vim.g.neovide_scroll_animation_far_lines = 0
+  vim.g.neovide_scroll_animation_length = 0.00
 end
