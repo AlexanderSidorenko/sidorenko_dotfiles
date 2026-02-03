@@ -450,6 +450,70 @@ make_keyboard_snappy() {
   fi
 }
 
+# Function to install Nix packages
+install_nix_packages() {
+  log "Installing Nix packages..."
+
+  # List of Nix packages to install
+  NIX_PACKAGES=(
+    eza
+    bat
+    ripgrep
+    zoxide
+    fzf
+    moor
+    delta
+    duf
+    ncdu
+    fd
+    tldr
+    jq
+    neovim
+    pv
+    tig
+    git
+    mc
+    ranger
+    direnv
+    neovide
+    universal-ctags
+    fish
+    ast-grep
+    luarocks
+    lua
+    lazygit
+    tectonic
+    texlive.combined.scheme-small # Provides pdflatex
+    mermaid-cli                   # Provides mmdc
+    wezterm
+  )
+
+  log "The following packages will be installed:"
+  for pkg in "${NIX_PACKAGES[@]}"; do
+    log "  - $(name "$pkg")"
+  done
+
+  # Install packages using nix-env
+  # The -A flag allows specifying attribute paths, which is often more precise.
+  # For simple package names, it's usually just the name itself.
+  if ! command -v nix-env &>/dev/null; then
+    warn "nix-env command not found. Skipping Nix package installation."
+    return 1
+  fi
+
+  # Construct the string for nix-env -iA
+  # Each package should be prefixed with 'nixpkgs.'
+  NIX_INSTALL_ARGS=()
+  for pkg in "${NIX_PACKAGES[@]}"; do
+    NIX_INSTALL_ARGS+=("nixpkgs.$pkg")
+  done
+
+  log "Running: nix-env -iA ${NIX_INSTALL_ARGS[*]}"
+  nix-env -iA "${NIX_INSTALL_ARGS[@]}"
+
+  log "Nix package installation complete."
+}
+
 main() {
   log "Installing sidorenko_dotfiles from DOTDIR=$(name "$DOTDIR")..."
   ensure_shrc_sources_repo bashrc
@@ -463,6 +527,14 @@ main() {
   install_wezterm
   make_keyboard_snappy
   symlink_prompt "${DOTDIR}/nvim" "${HOME}/.config/nvim"
+
+  local prompt="${C_GREEN}[sidorenko_dotfiles] Install Nix packages? (This might take a while) [y/N] ${C_RESET}"
+  if confirm_yes_no "$prompt"; then
+    install_nix_packages
+  else
+    log "Skipped Nix package installation."
+  fi
+
   log "sidorenko_dotfiles successfully installed!"
 }
 
