@@ -13,7 +13,7 @@ vim.opt.listchars = {
   nbsp = "␣", -- Non-breaking space
 }
 
-vim.opt.cursorline = true -- Highlight the current line
+vim.opt.cursorline = false -- Don't highlight the current line
 vim.opt.colorcolumn = "80" -- Visual line at 80 characters
 vim.opt.background = "dark" -- Force Neovim to always use Dark Mode
 
