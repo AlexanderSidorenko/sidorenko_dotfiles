@@ -1,8 +1,8 @@
 [core]
     # Use Neovim for commit messages
     editor = nvim
-    # Use Delta for standard 'git diff' viewing
-    pager = delta
+    # Use moor as the default pager
+    pager = moor
 
 [interactive]
     # Use Delta for 'git add -p'
@@ -42,6 +42,13 @@
     br = branch
     ci = commit
     st = status
+
+[pager]
+    # Use delta for diff-like commands
+    diff = delta
+    log = delta
+    reflog = delta
+    show = delta
 
 [delta]
     # Modern Delta UI settings

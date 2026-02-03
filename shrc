@@ -325,13 +325,13 @@ alias grep='grep --color=auto'
 alias egrep='egrep --color=auto'
 alias fgrep='fgrep --color=auto'
 
-# PAGER: Prioritize 'moar', fallback to 'bat', default to 'less'
-if command -v moar >/dev/null 2>&1; then
-  # MOAR: Modern, colorful, handles man pages natively
-  export PAGER="moar"
-  export MANPAGER="moar"
-  export MOAR="--no-linenumbers --statusbar=bold"
-  alias less='moar'
+# PAGER: Prioritize 'moor', fallback to 'bat', default to 'less'
+if command -v moor >/dev/null 2>&1; then
+  # MOOR: Modern, colorful, handles man pages natively
+  export PAGER="moor"
+  export MANPAGER="moor"
+  export MOOR="--no-linenumbers --statusbar=bold"
+  alias less='moor'
 elif command -v bat >/dev/null 2>&1; then
   # BAT: Can act as a pager for man pages
   alias less='bat --paging=always'
@@ -512,11 +512,6 @@ if command -v git >/dev/null 2>&1; then
   alias grh='git reset --hard'
   alias gclean='git clean -xfd'
 
-  if command -v delta >/dev/null 2>&1; then
-    export GIT_PAGER="delta"
-  else
-    export GIT_PAGER="less -FRSXMK"
-  fi
 fi
 
 # =============================================================================
