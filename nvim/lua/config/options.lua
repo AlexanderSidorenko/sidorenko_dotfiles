@@ -14,6 +14,8 @@ vim.opt.listchars = {
 }
 
 vim.opt.cursorline = true -- Highlight the current line
+vim.opt.colorcolumn = "80" -- Visual line at 80 characters
+vim.opt.background = "dark" -- Force Neovim to always use Dark Mode
 
 -- Normal Line Numbers
 vim.opt.number = true
