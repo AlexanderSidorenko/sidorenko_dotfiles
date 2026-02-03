@@ -374,11 +374,11 @@ install_font_droidsans_nerd() {
 }
 
 # Target Keyboard Repeat Settings (Snappy: 150ms delay, 15ms interval)
-TARGET_DELAY_MS=150
+TARGET_DELAY_MS=195
 TARGET_SPEED_MS=15
 
 # MacOS uses "ticks" (1 tick = 15ms)
-MAC_TARGET_DELAY=10 # 10 * 15ms = 150ms
+MAC_TARGET_DELAY=13 # 13 * 15ms = 195ms
 MAC_TARGET_SPEED=1  # 1 * 15ms = 15ms
 
 KEY_REPEAT_CHANGE_MADE=0
