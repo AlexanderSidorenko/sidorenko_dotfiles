@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "$(uname -s)" in
+  Darwin*)
+    if command -v open >/dev/null 2>&1; then
+      open -a "Neovide" --args "$@" >/dev/null 2>&1 &
+      disown || true
+      exit 0
+    fi
+    echo "neovide: macOS open not found" >&2
+    exit 1
+    ;;
+  Linux*)
+    "${HOME}/.sidorenko_dotfiles/bin/.neovide-linux-x86_64" "$@" >/dev/null 2>&1 &
+    disown || true
+    exit 0
+    ;;
+  *)
+    echo "neovide: unsupported OS" >&2
+    exit 1
+    ;;
+esac

@@ -6,28 +6,6 @@
 [[ $- != *i* ]] && return
 
 # =============================================================================
-# REQUIRED TOOLS CHECK
-# =============================================================================
-
-__require_tools() {
-  local missing=""
-  local t
-  for t in "$@"; do
-    command -v "$t" >/dev/null 2>&1 || missing="${missing} $t"
-  done
-  if [[ -n "$missing" ]]; then
-    echo "dotfiles: missing required tools:${missing}" >&2
-    return 1
-  fi
-}
-
-__require_tools \
-  eza bat rg moor zoxide fzf fd \
-  delta duf ncdu tldr jq nvim pv tig git mc ranger direnv neovide \
-  ctags fish sg luarocks lua lazygit tectonic pdflatex mmdc wezterm \
-  curl
-
-# =============================================================================
 # ENVIRONMENT VARIABLES
 # =============================================================================
 
@@ -276,6 +254,7 @@ fi
 path_prepend() { [[ -d "$1" ]] && PATH="$1:${PATH}"; }
 path_append()  { [[ -d "$1" ]] && PATH="${PATH}:$1"; }
 
+path_prepend "$HOME/.sidorenko_dotfiles/bin"
 path_prepend "$HOME/.local/bin"
 path_prepend "$HOME/bin"
 path_prepend "$HOME/.cargo/bin"
@@ -290,6 +269,28 @@ if $__is_macos; then
 fi
 export PATH
 ppath() { tr ':' '\n' <<<"$PATH" | nl -ba; }
+
+# =============================================================================
+# REQUIRED TOOLS CHECK
+# =============================================================================
+
+__require_tools() {
+  local missing=""
+  local t
+  for t in "$@"; do
+    command -v "$t" >/dev/null 2>&1 || missing="${missing} $t"
+  done
+  if [[ -n "$missing" ]]; then
+    echo "dotfiles: missing required tools:${missing}" >&2
+    return 1
+  fi
+}
+
+__require_tools \
+  eza bat rg moor less zoxide fzf fd \
+  delta duf ncdu tldr jq nvim pv tig git mc ranger direnv neovide \
+  ctags fish sg luarocks lua lazygit tectonic pdflatex mmdc wezterm \
+  curl
 
 # =============================================================================
 # COLORS AND COSMETICS
