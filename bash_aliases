@@ -12,7 +12,7 @@ alias gst='git status .'
 alias ga='git add'
 alias gco='git checkout'
 alias gg='git log --graph --pretty=oneline --abbrev-commit'
-alias gr='grep --color -n -R --include *.cpp --include *.h --include *.c . -e '
+alias gr='rg --color=always -n -g "*.cpp" -g "*.h" -g "*.c" -e '
 
 cf()
 {
