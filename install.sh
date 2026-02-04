@@ -475,7 +475,6 @@ install_nix_packages() {
     mc
     ranger
     direnv
-    neovide
     universal-ctags
     fish
     ast-grep
@@ -485,7 +484,6 @@ install_nix_packages() {
     tectonic
     texlive.combined.scheme-small # Provides pdflatex
     mermaid-cli                   # Provides mmdc
-    wezterm
   )
 
   log "The following packages will be installed:"
