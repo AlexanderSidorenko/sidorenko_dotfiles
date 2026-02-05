@@ -425,6 +425,15 @@ handle_mime() {
                 local pygmentize_format='terminal'
                 local highlight_format='ansi'
             fi
+
+            # Use bat for syntax highlighting
+            if command -v bat >/dev/null; then
+                bat --color=always --style="${BAT_STYLE}" --paging=never --wrap=never -- "${FILE_PATH}" && exit 5
+            elif command -v batcat >/dev/null; then
+                # For Debian/Ubuntu based systems where it might be named batcat
+                batcat --color=always --style="${BAT_STYLE}" --paging=never --wrap=never -- "${FILE_PATH}" && exit 5
+            fi
+
             env HIGHLIGHT_OPTIONS="${HIGHLIGHT_OPTIONS}" highlight \
                 --out-format="${highlight_format}" \
                 --force -- "${FILE_PATH}" && exit 5

@@ -305,17 +305,26 @@ EOF
 }
 
 install_ranger() {
-  local ranger_dir="${HOME}/.config/ranger"
-  local src="${DOTDIR}/ranger/rc.conf"
-  local dest="${ranger_dir}/rc.conf"
+  local ranger_src="${DOTDIR}/ranger"
+  local ranger_dest="${HOME}/.config/ranger"
 
-  [[ -e "$src" ]] || die "Missing ranger config: $(name "$src")"
+  # 1. Sanity check: ensure source directory exists
+  [[ -d "$ranger_src" ]] || die "Missing ranger config directory: $(name "$ranger_src")"
 
-  # Ensure ~/.config/ranger is a real directory (not a symlink),
-  # so we don't accidentally write into a symlinked tree.
-  ensure_dir_prompt "$ranger_dir" || return 0
+  # 2. Ensure ~/.config/ranger is a real directory
+  ensure_dir_prompt "$ranger_dest" || return 0
 
-  symlink_prompt "$src" "$dest"
+  # 3. Auto-enumerate and link all files/directories found in source
+  local src dest filename
+  for src in "${ranger_src}"/*; do
+    # Handle empty directory case (if glob returns literal string)
+    [[ -e "$src" ]] || continue
+
+    filename="$(basename "$src")"
+    dest="${ranger_dest}/${filename}"
+
+    symlink_prompt "$src" "$dest"
+  done
 }
 
 install_mc_keymap() {
