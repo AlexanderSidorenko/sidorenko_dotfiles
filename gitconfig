@@ -2,7 +2,7 @@
     # Use Neovim for commit messages
     editor = nvim
     # Use moor as the default pager
-    pager = moor
+    pager = moor --quit-if-one-screen
 
 [interactive]
     # Use Delta for 'git add -p'
