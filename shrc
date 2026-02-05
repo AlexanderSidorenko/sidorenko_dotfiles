@@ -35,6 +35,26 @@ __is_macos=false
 [[ "$OSTYPE" == "darwin"* ]] && __is_macos=true
 
 # =============================================================================
+# PATH MANAGEMENT
+# =============================================================================
+if [ -e "/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh" ]; then
+  # This script automatically prepends ~/.nix-profile/bin to your PATH
+  source "/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh"
+fi
+
+path_prepend() { [[ -d "$1" ]] && PATH="$1:${PATH}"; }
+path_append()  { [[ -d "$1" ]] && PATH="${PATH}:$1"; }
+
+path_prepend "$HOME/.sidorenko_dotfiles/bin"
+path_prepend "$HOME/.local/bin"
+path_prepend "$HOME/bin"
+path_prepend "$HOME/.cargo/bin"
+path_prepend "$HOME/go/bin"
+path_prepend "$HOME/.npm-global/bin"
+path_prepend "$HOME/.asdf/bin"
+path_prepend "$HOME/.asdf/shims"
+
+# =============================================================================
 # SHELL SPECIFIC LOGIC
 # =============================================================================
 
@@ -247,21 +267,6 @@ elif [ -n "$BASH_VERSION" ]; then
         cd -- "$dir" || return
     }
 fi
-
-# =============================================================================
-# PATH MANAGEMENT
-# =============================================================================
-path_prepend() { [[ -d "$1" ]] && PATH="$1:${PATH}"; }
-path_append()  { [[ -d "$1" ]] && PATH="${PATH}:$1"; }
-
-path_prepend "$HOME/.sidorenko_dotfiles/bin"
-path_prepend "$HOME/.local/bin"
-path_prepend "$HOME/bin"
-path_prepend "$HOME/.cargo/bin"
-path_prepend "$HOME/go/bin"
-path_prepend "$HOME/.npm-global/bin"
-path_prepend "$HOME/.asdf/bin"
-path_prepend "$HOME/.asdf/shims"
 
 if $__is_macos; then
   [[ -d "/opt/homebrew/bin" ]] && path_prepend "/opt/homebrew/bin"
