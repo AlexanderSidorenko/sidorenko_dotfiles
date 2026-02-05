@@ -153,10 +153,7 @@ if [ -n "$ZSH_VERSION" ]; then
     eval "$(zoxide init zsh)"
 
     # Load FZF
-    for dir in /usr/share/fzf /usr/local/opt/fzf/shell /opt/homebrew/opt/fzf/shell /usr/share/doc/fzf/examples; do
-        [[ -r "$dir/key-bindings.zsh" ]] && source "$dir/key-bindings.zsh"
-        [[ -r "$dir/completion.zsh" ]] && source "$dir/completion.zsh"
-    done
+    source <(fzf --zsh)
 
 elif [ -n "$BASH_VERSION" ]; then
     # -------------------------------------------------------------------------
@@ -255,17 +252,7 @@ elif [ -n "$BASH_VERSION" ]; then
     eval "$(zoxide init bash)"
 
     # Load FZF
-    for dir in /usr/share/fzf /usr/local/opt/fzf/shell /opt/homebrew/opt/fzf/shell /usr/share/doc/fzf/examples; do
-        [[ -r "$dir/key-bindings.bash" ]] && source "$dir/key-bindings.bash"
-        [[ -r "$dir/completion.bash" ]] && source "$dir/completion.bash"
-    done
-        
-    # FZF-powered cd
-    fcd() {
-        local dir
-        dir="$(fd --type d --hidden --exclude .git . 2>/dev/null | fzf +m)" || return
-        cd -- "$dir" || return
-    }
+    eval "$(fzf --bash)"
 fi
 
 if $__is_macos; then
