@@ -30,6 +30,9 @@ vim.opt.tabstop = 2 -- Number of spaces tabs count for<
 -- Disable animations for a faster feel
 vim.g.snacks_animate = false
 
+-- Disable autoformat by default
+vim.g.autoformat = false
+
 if vim.g.neovide then
   vim.o.guifont = "DroidSansM Nerd Font:h14"
   vim.g.neovide_scale_factor = 1.0
