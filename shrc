@@ -347,6 +347,8 @@ alias sl='ls'
 alias grpe='rg'
 alias please='sudo $(fc -ln -1)'
 
+alias clear='if [ -n "$TMUX" ]; then clear && tmux clear-history; else clear; fi'
+
 # =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
