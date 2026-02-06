@@ -475,6 +475,7 @@ install_nix_packages() {
   NIX_PACKAGES=(
     ast-grep
     bat
+    cscope
     delta
     direnv
     duf
