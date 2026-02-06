@@ -352,6 +352,14 @@ install_wezterm() {
   symlink_prompt "$src" "$dest"
 }
 
+install_tmux() {
+  local src="${DOTDIR}/tmux.conf"
+  local dest="${HOME}/.tmux.conf"
+
+  [[ -e "$src" ]] || die "Missing tmux config: $(name "$src")"
+  symlink_prompt "$src" "$dest"
+}
+
 install_font_droidsans_nerd() {
   local src="${DOTDIR}/DroidSansMNerdFont-Regular.otf"
   local font_dir
@@ -532,6 +540,7 @@ main() {
   install_ranger
   install_mc_keymap
   install_wezterm
+  install_tmux
   make_keyboard_snappy
   symlink_prompt "${DOTDIR}/nvim" "${HOME}/.config/nvim"
 
