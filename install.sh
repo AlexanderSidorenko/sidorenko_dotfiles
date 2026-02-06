@@ -495,11 +495,14 @@ install_nix_packages() {
     pv
     ranger
     ripgrep
+    sshpass
     tectonic
     texlive.combined.scheme-small # Provides pdflatex
     tig
     tldr
+    tmux
     universal-ctags
+    wget
     zoxide
   )
 
