@@ -473,34 +473,34 @@ install_nix_packages() {
 
   # List of Nix packages to install
   NIX_PACKAGES=(
-    eza
+    ast-grep
     bat
-    ripgrep
-    zoxide
-    fzf
-    moor
     delta
+    direnv
     duf
-    ncdu
+    eza
     fd
-    tldr
+    fish
+    fzf
+    git
     jq
+    lazygit
+    lua
+    luarocks
+    mc
+    mermaid-cli                   # Provides mmdc
+    moor
+    ncdu
     neovim
     pv
-    tig
-    git
-    mc
     ranger
-    direnv
-    universal-ctags
-    fish
-    ast-grep
-    luarocks
-    lua
-    lazygit
+    ripgrep
     tectonic
     texlive.combined.scheme-small # Provides pdflatex
-    mermaid-cli                   # Provides mmdc
+    tig
+    tldr
+    universal-ctags
+    zoxide
   )
 
   log "The following packages will be installed:"
