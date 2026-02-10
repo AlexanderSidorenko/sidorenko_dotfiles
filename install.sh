@@ -475,6 +475,7 @@ install_nix_packages() {
   NIX_PACKAGES=(
     ast-grep
     bat
+    coreutils
     cscope
     delta
     direnv
@@ -494,6 +495,7 @@ install_nix_packages() {
     ncdu
     neovim
     pv
+    qrencode
     ranger
     ripgrep
     sshpass
@@ -505,6 +507,7 @@ install_nix_packages() {
     universal-ctags
     wget
     zoxide
+    zstd
   )
 
   log "The following packages will be installed:"
