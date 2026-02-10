@@ -506,6 +506,8 @@ install_nix_packages() {
     tmux
     universal-ctags
     wget
+    wl-clipboard
+    xclip
     zoxide
     zstd
   )

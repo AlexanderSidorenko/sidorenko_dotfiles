@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -t 0 && "$#" -gt 0 ]]; then
+  input="$*"
+else
+  input="$(cat)"
+fi
+
+[[ -n "$input" ]] || exit 0
+
+is_ssh=false
+if [[ -n "${SSH_CONNECTION-}" || -n "${SSH_TTY-}" ]]; then
+  is_ssh=true
+fi
+
+use_osc52=false
+if [[ "$is_ssh" == true ]]; then
+  use_osc52=true
+fi
+
+if [[ "$use_osc52" == false ]]; then
+  if command -v pbcopy >/dev/null 2>&1; then
+    printf '%s' "$input" | pbcopy
+    exit 0
+  fi
+
+  if command -v wl-copy >/dev/null 2>&1 && [[ -n "${WAYLAND_DISPLAY-}" ]]; then
+    printf '%s' "$input" | wl-copy
+    exit 0
+  fi
+
+  if command -v xclip >/dev/null 2>&1 && [[ -n "${DISPLAY-}" ]]; then
+    printf '%s' "$input" | xclip -in -selection clipboard
+    exit 0
+  fi
+
+  use_osc52=true
+fi
+
+if [[ "$use_osc52" == true ]]; then
+  b64="$(printf '%s' "$input" | base64 | tr -d '\n')"
+  [[ -n "$b64" ]] || exit 0
+  if [[ -n "${TMUX-}" ]]; then
+    printf '\033Ptmux;\033\033]52;c;%s\a\033\\' "$b64"
+  else
+    printf '\033]52;c;%s\a' "$b64"
+  fi
+fi
