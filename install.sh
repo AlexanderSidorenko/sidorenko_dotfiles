@@ -36,10 +36,14 @@ confirm_override() {
 
 confirm_yes_no() {
   local prompt="$1"
+  local default="${2:-N}"
   local reply
 
   read -r -p "$prompt" reply || true
-  reply="${reply:-N}"
+  case "$default" in
+  [Yy]) reply="${reply:-Y}" ;;
+  *) reply="${reply:-N}" ;;
+  esac
 
   case "$reply" in
   [Yy] | [Yy][Ee][Ss]) return 0 ;;
@@ -288,7 +292,7 @@ EOF
     fi
 
     local prompt="${C_GREEN}[sidorenko_dotfiles] Install optional gitconfig.personal include? [y/N] ${C_RESET}"
-    if confirm_yes_no "$prompt"; then
+    if confirm_yes_no "$prompt" N; then
       log "Appending personal include block to $(name "$user_gitconfig")"
       cat >>"$user_gitconfig" <<EOF
 
@@ -554,7 +558,7 @@ main() {
   symlink_prompt "${DOTDIR}/nvim" "${HOME}/.config/nvim"
 
   local prompt="${C_GREEN}[sidorenko_dotfiles] Install Nix packages? (This might take a while) [y/N] ${C_RESET}"
-  if confirm_yes_no "$prompt"; then
+  if confirm_yes_no "$prompt" N; then
     install_nix_packages
   else
     log "Skipped Nix package installation."
