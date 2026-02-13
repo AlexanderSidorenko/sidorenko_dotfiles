@@ -364,6 +364,82 @@ install_tmux() {
   symlink_prompt "$src" "$dest"
 }
 
+maybe_switch_default_shell_to_zsh() {
+  local current_shell=""
+  local current_shell_base=""
+  local zsh_path=""
+  local prompt=""
+  local user_name
+  local passwd_entry=""
+
+  user_name="$(id -un)"
+
+  if command -v getent &>/dev/null; then
+    passwd_entry="$(getent passwd "$user_name" || true)"
+    current_shell="$(printf '%s' "$passwd_entry" | cut -d: -f7)"
+  elif [[ "$(uname)" == "Darwin" ]] && command -v dscl &>/dev/null; then
+    current_shell="$(dscl . -read "/Users/${user_name}" UserShell 2>/dev/null | awk '{print $2}' || true)"
+  fi
+
+  if [[ -z "$current_shell" ]]; then
+    current_shell="${SHELL:-}"
+  fi
+
+  current_shell_base="$(basename "${current_shell:-}")"
+  if [[ "$current_shell_base" == "zsh" ]]; then
+    log "Default shell already set to zsh"
+    return 0
+  fi
+
+  if [[ -x /usr/bin/zsh ]]; then
+    zsh_path="/usr/bin/zsh"
+  else
+    zsh_path="$(command -v zsh || true)"
+  fi
+
+  if [[ -z "$zsh_path" ]]; then
+    if [[ "$(uname)" == "Linux" ]] && command -v apt &>/dev/null; then
+      # We intentionally install distro zsh instead of Nix zsh because chsh expects
+      # a stable shell path listed in /etc/shells (for example /usr/bin/zsh).
+      prompt="${C_GREEN}[sidorenko_dotfiles] zsh is not installed. Install ${C_BLUE}zsh${C_GREEN} with apt now? [Y/n] ${C_RESET}"
+      if confirm_yes_no "$prompt" Y; then
+        if sudo apt update && sudo apt install -y zsh; then
+          if [[ -x /usr/bin/zsh ]]; then
+            zsh_path="/usr/bin/zsh"
+          else
+            zsh_path="$(command -v zsh || true)"
+          fi
+        else
+          warn "Could not install zsh with apt."
+        fi
+      fi
+    fi
+  fi
+
+  if [[ -z "$zsh_path" ]]; then
+    warn "zsh is not installed. Skipping default shell switch."
+    return 0
+  fi
+
+  prompt="${C_GREEN}[sidorenko_dotfiles] Default shell is ${C_BLUE}${current_shell:-unknown}${C_GREEN}. Change it to ${C_BLUE}${zsh_path}${C_GREEN}? [Y/n] ${C_RESET}"
+  if ! confirm_yes_no "$prompt" Y; then
+    log "Kept current default shell: $(name "${current_shell:-unknown}")"
+    return 0
+  fi
+
+  if ! command -v chsh &>/dev/null; then
+    warn "chsh command not found. Unable to change default shell."
+    return 0
+  fi
+
+  if chsh -s "$zsh_path"; then
+    log "Default shell changed to $(name "$zsh_path")"
+    log "Open a new terminal session for the shell change to take effect."
+  else
+    warn "Could not change default shell automatically. You can run: chsh -s $zsh_path"
+  fi
+}
+
 install_font_droidsans_nerd() {
   local src="${DOTDIR}/DroidSansMNerdFont-Regular.otf"
   local font_dir
@@ -548,6 +624,7 @@ main() {
   ensure_bash_profile_sources_bashrc
   ensure_shrc_sources_repo zshrc
   ensure_zprofile_sources_zshrc
+  maybe_switch_default_shell_to_zsh
   install_gitconfig
   install_font_droidsans_nerd
   install_ranger
