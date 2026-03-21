@@ -142,7 +142,7 @@ read -r do_copy
 do_copy="${do_copy:-Y}"
 
 if [[ "${do_copy}" =~ ^[Yy]$ ]]; then
-  ssh-copy-id -i "${key_path}.pub" "${username}@${first_address}"
+  ssh-copy-id -o PreferredAuthentications=password -o PubkeyAuthentication=no -i "${key_path}.pub" "${username}@${first_address}"
 else
   green "Skipped ssh-copy-id."
 fi
