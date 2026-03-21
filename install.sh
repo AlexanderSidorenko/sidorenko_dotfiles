@@ -507,19 +507,30 @@ configure_key_repeat_macos() {
 # Function to check and set Ubuntu (GNOME) key repeat values
 configure_key_repeat_ubuntu() {
   if ! command -v gsettings &>/dev/null; then
-    warn "Error: gsettings not found. Requires standard GNOME environment."
-    exit 1
+    warn "Skipping keyboard repeat tuning: gsettings not found."
+    return 0
+  fi
+
+  # Headless/minimal systems may have gsettings binary but no schemas/session.
+  if ! gsettings list-schemas >/dev/null 2>&1; then
+    warn "Skipping keyboard repeat tuning: gsettings schemas are unavailable."
+    return 0
+  fi
+
+  if ! gsettings list-schemas | grep -Fxq "org.gnome.desktop.peripherals.keyboard"; then
+    warn "Skipping keyboard repeat tuning: GNOME keyboard schema is unavailable."
+    return 0
   fi
 
   # Check Delay (Strip 'uint32' if present)
-  CURRENT_DELAY=$(gsettings get org.gnome.desktop.peripherals.keyboard delay | tr -cd '0-9')
+  CURRENT_DELAY=$(gsettings get org.gnome.desktop.peripherals.keyboard delay 2>/dev/null | tr -cd '0-9')
   if [[ "$CURRENT_DELAY" != "$TARGET_DELAY_MS" ]]; then
     gsettings set org.gnome.desktop.peripherals.keyboard delay $TARGET_DELAY_MS
     KEY_REPEAT_CHANGE_MADE=1
   fi
 
   # Check Speed (Strip 'uint32' if present)
-  CURRENT_SPEED=$(gsettings get org.gnome.desktop.peripherals.keyboard repeat-interval | tr -cd '0-9')
+  CURRENT_SPEED=$(gsettings get org.gnome.desktop.peripherals.keyboard repeat-interval 2>/dev/null | tr -cd '0-9')
   if [[ "$CURRENT_SPEED" != "$TARGET_SPEED_MS" ]]; then
     gsettings set org.gnome.desktop.peripherals.keyboard repeat-interval $TARGET_SPEED_MS
     KEY_REPEAT_CHANGE_MADE=1
@@ -535,8 +546,8 @@ make_keyboard_snappy() {
   elif [[ "$(uname)" == "Linux" ]]; then
     configure_key_repeat_ubuntu
   else
-    warn "Unsupported Operating System."
-    exit 1
+    warn "Skipping keyboard repeat tuning: unsupported operating system."
+    return 0
   fi
 
   # Final Output
@@ -570,7 +581,6 @@ install_nix_packages() {
     lua
     luarocks
     mc
-    mermaid-cli                   # Provides mmdc
     moor
     ncdu
     neovim
@@ -579,8 +589,6 @@ install_nix_packages() {
     ranger
     ripgrep
     sshpass
-    tectonic
-    texlive.combined.scheme-small # Provides pdflatex
     tig
     tldr
     tmux

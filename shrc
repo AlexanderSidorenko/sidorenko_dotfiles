@@ -281,7 +281,7 @@ __require_tools() {
 __require_tools \
   eza bat rg moor less zoxide fzf fd \
   delta duf ncdu tldr jq nvim pv tig git mc ranger direnv \
-  ctags fish luarocks lua lazygit tectonic pdflatex mmdc curl
+  ctags fish luarocks lua lazygit curl
 
 # =============================================================================
 # COLORS AND COSMETICS
