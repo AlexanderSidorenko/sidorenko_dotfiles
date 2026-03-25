@@ -397,6 +397,50 @@ extract() {
   esac
 }
 
+# Create a compressed tarball with a pv progress bar.
+# The format is chosen automatically from the output filename extension:
+#   .tar.gz / .tgz   — gzip   (fast, ubiquitous)
+#   .tar.bz2 / .tbz2 — bzip2  (better ratio, slower)
+#   .tar.xz / .txz   — xz     (best ratio, slowest)
+#   .tar.zst / .tzst — zstd   (near-xz ratio, much faster)
+#   .tar.lz4         — lz4    (fastest, least compression)
+# Usage: tarpv <output.tar.gz> <file|dir>...
+tarpv() {
+  if [[ $# -lt 2 ]]; then
+    echo "usage: tarpv <output.tar.gz> <file|dir>..." >&2
+    return 1
+  fi
+  local out="$1"; shift
+  local total
+  total="$(du --bytes --summarize --total -- "$@" | awk 'END { print $1 }')"
+  echo "Total: ${total} bytes"
+  tar caf - -- "$@" | pv --progress --eta --rate --bytes --size "$total" > "$out"
+}
+
+# Extract a tarball with a pv progress bar.
+# Supports all formats listed above; compression is auto-detected from the stream.
+# Usage: untarpv <tarball> [dest]
+untarpv() {
+  if [[ $# -lt 1 ]]; then
+    echo "usage: untarpv <tarball> [dest]" >&2
+    return 1
+  fi
+  local src="$1"
+  local dest="${2:-}"
+  if [[ -n "$dest" ]]; then
+    pv "$src" | tar xaf - -C "$dest"
+  else
+    pv "$src" | tar xaf -
+  fi
+}
+
+# Look up a cheat sheet from cht.sh.
+# Usage: cheat <topic>  (e.g. cheat tar, cheat python/list-comprehension)
+cheat() {
+  [[ -n "${1:-}" ]] || { echo "usage: cheat <topic>" >&2; return 1; }
+  curl -fsSL "cht.sh/$1"
+}
+
 serve() {
   local port="${1:-8000}"
   if command -v python3 >/dev/null 2>&1; then
