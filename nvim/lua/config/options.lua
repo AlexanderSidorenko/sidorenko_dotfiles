@@ -13,6 +13,9 @@ vim.opt.listchars = {
   nbsp = "␣", -- Non-breaking space
 }
 
+vim.opt.ignorecase = true -- Case-insensitive search by default
+vim.opt.smartcase = true -- ...unless the query contains uppercase
+vim.opt.gdefault = true -- Substitute all matches on a line by default (:s///g)
 vim.opt.cursorline = false -- Don't highlight the current line
 vim.opt.colorcolumn = "80" -- Visual line at 80 characters
 vim.opt.background = "dark" -- Force Neovim to always use Dark Mode
