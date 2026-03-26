@@ -76,9 +76,7 @@ if [ -n "$ZSH_VERSION" ]; then
     export HISTSIZE=200000
     export SAVEHIST=400000
     export HISTFILE="${HOME}/.zsh_history"
-    setopt append_history           # Append to history file instead of overwriting
-    setopt inc_append_history       # Write to file immediately after execution
-    setopt share_history            # Share history instantly between running sessions
+    setopt share_history            # Share history across sessions (implies inc_append_history)
     setopt hist_ignore_all_dups     # Remove older duplicate entries from history
     setopt hist_ignore_space        # Ignore commands starting with a space
     setopt hist_reduce_blanks       # Trim extra spaces before recording
@@ -150,10 +148,14 @@ if [ -n "$ZSH_VERSION" ]; then
     fi
 
     # Load zoxide
-    eval "$(zoxide init zsh)"
+    if command -v zoxide >/dev/null 2>&1; then
+        eval "$(zoxide init zsh)"
+    fi
 
     # Load FZF
-    source <(fzf --zsh)
+    if command -v fzf >/dev/null 2>&1; then
+        source <(fzf --zsh)
+    fi
 
 elif [ -n "$BASH_VERSION" ]; then
     # -------------------------------------------------------------------------
@@ -249,10 +251,14 @@ elif [ -n "$BASH_VERSION" ]; then
     fi
 
     # Load zoxide
-    eval "$(zoxide init bash)"
+    if command -v zoxide >/dev/null 2>&1; then
+        eval "$(zoxide init bash)"
+    fi
 
     # Load FZF
-    eval "$(fzf --bash)"
+    if command -v fzf >/dev/null 2>&1; then
+        eval "$(fzf --bash)"
+    fi
 fi
 
 if $__is_macos; then
