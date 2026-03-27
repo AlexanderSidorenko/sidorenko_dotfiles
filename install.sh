@@ -595,6 +595,7 @@ install_nix_packages() {
     tldr
     tmux
     tree
+    tree-sitter
     universal-ctags
     wget
     wl-clipboard

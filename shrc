@@ -318,6 +318,7 @@ __require_tools \
   tldr \
   tmux \
   tree \
+  tree-sitter \
   wget \
   wl-copy \
   xclip \
