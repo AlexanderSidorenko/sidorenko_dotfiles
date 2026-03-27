@@ -549,6 +549,43 @@ fkill() {
   ps aux | fzf -i --header="select process to kill" | awk '{print $2}' | xargs -r kill -9
 }
 
+# Full reinstall of Nix packages: diff installed vs desired, then install all.
+nix_reinstall() {
+  local dotdir="${SIDORENKO_DOTFILES:-$HOME/.sidorenko_dotfiles}"
+  local pkg_file="${dotdir}/nix-packages.sh"
+
+  if [[ ! -r "$pkg_file" ]]; then
+    echo "nix_reinstall: package list not found: $pkg_file" >&2
+    return 1
+  fi
+  if ! command -v nix-env >/dev/null 2>&1; then
+    echo "nix_reinstall: nix-env not found" >&2
+    return 1
+  fi
+
+  # shellcheck source=nix-packages.sh
+  local NIX_PACKAGES=()
+  source "$pkg_file"
+
+  local installed desired
+  installed="$(nix-env -q | sort)"
+  desired="$(printf '%s\n' "${NIX_PACKAGES[@]}" | sort)"
+
+  echo "=== Diff (< installed, > desired) ==="
+  diff <(echo "$installed") <(echo "$desired") || true
+  echo ""
+
+  local nix_args=()
+  local pkg
+  for pkg in "${NIX_PACKAGES[@]}"; do
+    nix_args+=("nixpkgs.$pkg")
+  done
+
+  echo "Installing ${#NIX_PACKAGES[@]} packages..."
+  nix-env -iA "${nix_args[@]}"
+  echo "Done."
+}
+
 # =============================================================================
 # GIT ALIASES
 # =============================================================================
