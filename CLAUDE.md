@@ -61,5 +61,5 @@ bash -n bin/ssh-host-setup.sh && shellcheck bin/ssh-host-setup.sh
 
 - `shrc` is sourced by both bash and zsh — avoid bashisms or zshisms outside their respective `if` blocks.
 - Tool integrations (fzf, zoxide, etc.) are guarded with `command -v` checks; keep this consistent for new additions.
-- New tools that should be installed by default go in `install.sh:install_nix_packages`.
+- New tools that should be installed by default go in `install.sh:install_nix_packages`. Look up exact Nix attribute names at https://search.nixos.org/packages before adding. Platform-specific packages (e.g., wl-clipboard, xclip) go in the Linux-only section.
 - `~/.bashrc.local` is sourced last for machine-specific overrides not tracked in this repo.

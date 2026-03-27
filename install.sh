@@ -562,7 +562,7 @@ make_keyboard_snappy() {
 install_nix_packages() {
   log "Installing Nix packages..."
 
-  # List of Nix packages to install
+  # Shared packages (all platforms)
   NIX_PACKAGES=(
     ast-grep
     bat
@@ -572,7 +572,7 @@ install_nix_packages() {
     delta
     direnv
     duf
-    eternalterminal
+    eternal-terminal
     eza
     fd
     fish
@@ -599,11 +599,17 @@ install_nix_packages() {
     tree-sitter
     universal-ctags
     wget
-    wl-clipboard
-    xclip
     zoxide
     zstd
   )
+
+  # Linux-only packages (Wayland/X11 clipboard tools)
+  if [[ "$(uname)" == "Linux" ]]; then
+    NIX_PACKAGES+=(
+      wl-clipboard
+      xclip
+    )
+  fi
 
   log "The following packages will be installed:"
   for pkg in "${NIX_PACKAGES[@]}"; do

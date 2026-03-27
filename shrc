@@ -321,10 +321,15 @@ __require_tools \
   tree \
   tree-sitter \
   wget \
-  wl-copy \
-  xclip \
   zoxide \
   zstd
+
+# Linux-only tools (Wayland/X11 clipboard)
+if [[ "$(uname)" == "Linux" ]]; then
+  __require_tools \
+    wl-copy \
+    xclip
+fi
 
 # =============================================================================
 # COLORS AND COSMETICS
