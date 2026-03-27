@@ -294,6 +294,7 @@ __require_tools \
   delta \
   direnv \
   duf \
+  et \
   eza \
   fd \
   fish \

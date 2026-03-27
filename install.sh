@@ -572,6 +572,7 @@ install_nix_packages() {
     delta
     direnv
     duf
+    eternalterminal
     eza
     fd
     fish
