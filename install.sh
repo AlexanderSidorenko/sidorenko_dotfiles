@@ -380,7 +380,11 @@ maybe_switch_default_shell_to_zsh() {
   local user_name
   local passwd_entry=""
 
-  user_name="$(id -un)"
+  user_name="$(id -un 2>/dev/null || echo "${USER:-}")"
+  if [[ -z "$user_name" ]]; then
+    warn "Cannot determine username. Skipping default shell switch."
+    return 0
+  fi
 
   if command -v getent &>/dev/null; then
     passwd_entry="$(getent passwd "$user_name" || true)"
