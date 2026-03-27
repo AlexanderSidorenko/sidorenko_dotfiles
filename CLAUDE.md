@@ -7,10 +7,9 @@ Personal dotfiles for Alexander Sidorenko. Targets Linux (primary) and macOS.
 ```
 install.sh          — interactive installer; idempotent, safe to re-run
 shrc                — unified shell config sourced by both bash and zsh
-bashrc / zshrc      — thin wrappers: source shrc, then shell-specific extras
 gitconfig           — git defaults (delta, nvim, moor pager)
 gitconfig.personal  — optional personal identity include
-tmux.conf           — tmux config; prefix Ctrl+A, vi keys
+tmux.conf           — tmux config; prefix Ctrl+Space, vi keys
 ripgreprc           — global rg flags
 tigrc               — tig config
 mc.keymap           — Midnight Commander keymap

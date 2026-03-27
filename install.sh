@@ -144,12 +144,15 @@ copy_prompt() {
 }
 
 ensure_shrc_sources_repo() {
-  # Usage: ensure_rc_sources_repo bashrc
-  local rc="$1"
-  local repo_fragment="${DOTDIR}/${rc}"
-  local user_rc="${HOME}/.${rc}"
+  # Usage: ensure_shrc_sources_repo <user_rc> <repo_file>
+  # e.g.  ensure_shrc_sources_repo bashrc shrc
+  local user_rc_name="$1"
+  local repo_file="$2"
+  local repo_fragment="${DOTDIR}/${repo_file}"
+  local user_rc="${HOME}/.${user_rc_name}"
 
-  [[ -n "$rc" ]] || die "ensure_rc_sources_repo: missing rc name"
+  [[ -n "$user_rc_name" ]] || die "ensure_shrc_sources_repo: missing user rc name"
+  [[ -n "$repo_file" ]] || die "ensure_shrc_sources_repo: missing repo file"
   [[ -e "$repo_fragment" ]] || die "Missing repo fragment: $(name "$repo_fragment")"
 
   # Prompt before replacing unexpected path types (e.g., dir or device file).
@@ -177,8 +180,8 @@ ensure_shrc_sources_repo() {
 # >>> sidorenko_dotfiles >>>
 # Auto-added by \$HOME/.sidorenko_dotfiles/install.sh
 export SIDORENKO_DOTFILES="\$HOME/.sidorenko_dotfiles"
-if [ -r "\$SIDORENKO_DOTFILES/${rc}" ]; then
-  . "\$SIDORENKO_DOTFILES/${rc}"
+if [ -r "\$SIDORENKO_DOTFILES/${repo_file}" ]; then
+  . "\$SIDORENKO_DOTFILES/${repo_file}"
 fi
 # <<< sidorenko_dotfiles <<<
 EOF
@@ -593,9 +596,9 @@ install_nix_packages() {
 
 main() {
   log "Installing sidorenko_dotfiles from DOTDIR=$(name "$DOTDIR")..."
-  ensure_shrc_sources_repo bashrc
+  ensure_shrc_sources_repo bashrc shrc
   ensure_bash_profile_sources_bashrc
-  ensure_shrc_sources_repo zshrc
+  ensure_shrc_sources_repo zshrc shrc
   ensure_zprofile_sources_zshrc
   maybe_switch_default_shell_to_zsh
   install_gitconfig

@@ -372,7 +372,6 @@ export MOOR="--no-linenumbers --statusbar=bold"
 alias less='moor'
 
 # Shortcuts
-alias c='clear'
 alias h='history'
 alias j='jobs -l'
 alias path='ppath'
@@ -393,9 +392,8 @@ alias ...='cd ../..'
 alias ....='cd ../../..'
 alias sl='ls'
 alias grpe='rg'
-alias please='sudo $(fc -ln -1)'
 
-alias clear='if [ -n "$TMUX" ]; then clear && tmux clear-history; else clear; fi'
+alias c='if [ -n "$TMUX" ]; then clear && tmux clear-history; else clear; fi'
 
 # =============================================================================
 # UTILITY FUNCTIONS
@@ -424,26 +422,6 @@ fi
 mkcd() { mkdir -p -- "$1" && cd -- "$1"; }
 cdf() { cd -- "$(dirname -- "$1")"; }
 up() { local n=${1:-1}; while (( n-- > 0 )); do cd .. || return; done; }
-
-extract() {
-  [[ -f "$1" ]] || { echo "extract: file not found: $1" >&2; return 2; }
-  case "$1" in
-    *.tar.bz2) tar xjf "$1" ;;
-    *.tar.gz)  tar xzf "$1" ;;
-    *.tar.xz)  tar xJf "$1" ;;
-    *.tar.zst) tar --zstd -xf "$1" ;;
-    *.tar)     tar xf "$1" ;;
-    *.tbz2)    tar xjf "$1" ;;
-    *.tgz)     tar xzf "$1" ;;
-    *.zip)     unzip "$1" ;;
-    *.7z)      7z x "$1" ;;
-    *.rar)     unrar x "$1" ;;
-    *.gz)      gunzip "$1" ;;
-    *.bz2)     bunzip2 "$1" ;;
-    *.xz)      unxz "$1" ;;
-    *) echo "extract: don't know how to extract '$1'" >&2; return 3 ;;
-  esac
-}
 
 # Create a compressed tarball with a pv progress bar.
 # The format is chosen automatically from the output filename extension:
@@ -489,18 +467,6 @@ cheat() {
   curl -fsSL "cht.sh/$1"
 }
 
-serve() {
-  local port="${1:-8000}"
-  if command -v python3 >/dev/null 2>&1; then
-    python3 -m http.server "$port"
-  elif command -v python >/dev/null 2>&1; then
-    python -m SimpleHTTPServer "$port"
-  else
-    echo "serve: python not found" >&2
-    return 1
-  fi
-}
-
 timer() {
   local start end
   start="$(date +%s)"
@@ -516,14 +482,6 @@ cgr() {
   local root
   root="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "Not in a git repo" >&2; return 2; }
   cd "$root" || return
-}
-
-pj() {
-  if command -v jq >/dev/null 2>&1; then
-    jq .
-  else
-    python3 -m json.tool
-  fi
 }
 
 rgf() {
@@ -617,41 +575,6 @@ if command -v git >/dev/null 2>&1; then
   alias gstp='git stash pop'
   alias grh='git reset --hard'
   alias gclean='git clean -xfd'
-
 fi
-
-# =============================================================================
-# TOOL ALIASES (DOCKER / K8S / TERRAFORM)
-# =============================================================================
-if command -v docker >/dev/null 2>&1; then
-  alias d='docker'
-  alias dps='docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"'
-  alias dcu='docker compose up'
-  alias dcd='docker compose down'
-  alias dcl='docker compose logs -f --tail=200'
-  alias dimg='docker images'
-fi
-
-if command -v kubectl >/dev/null 2>&1; then
-  alias k='kubectl'
-  alias kgp='kubectl get pods'
-  alias kgs='kubectl get svc'
-  alias kgn='kubectl get nodes -o wide'
-  alias kctx='kubectl config current-context'
-  alias kns='kubectl config set-context --current --namespace'
-fi
-
-if command -v terraform >/dev/null 2>&1; then
-  alias tf='terraform'
-  alias tfi='terraform init'
-  alias tfp='terraform plan'
-  alias tfa='terraform apply'
-  alias tfd='terraform destroy'
-fi
-
-# =============================================================================
-# GPG & LOCAL CONFIG
-# =============================================================================
-export GPG_TTY="$(tty 2>/dev/null || true)"
 
 [[ -r "$HOME/.bashrc.local" ]] && source "$HOME/.bashrc.local"
