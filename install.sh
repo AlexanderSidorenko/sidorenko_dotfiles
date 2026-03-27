@@ -20,6 +20,11 @@ die() {
   exit 1
 }
 
+# True if a graphical environment is available (macOS, X11, or Wayland).
+has_gui() {
+  [[ -n "${DISPLAY-}" || -n "${WAYLAND_DISPLAY-}" || "$(uname)" == "Darwin" ]]
+}
+
 confirm_override() {
   local target="$1"
   local reply
@@ -602,12 +607,20 @@ main() {
   ensure_zprofile_sources_zshrc
   maybe_switch_default_shell_to_zsh
   install_gitconfig
-  install_font_droidsans_nerd
+  if has_gui; then
+    install_font_droidsans_nerd
+  else
+    log "Skipping font install (headless)"
+  fi
   install_ranger
   install_mc_keymap
   install_wezterm
   install_tmux
-  make_keyboard_snappy
+  if has_gui; then
+    make_keyboard_snappy
+  else
+    log "Skipping keyboard repeat tuning (headless)"
+  fi
   symlink_prompt "${DOTDIR}/nvim" "${HOME}/.config/nvim"
 
   local prompt="${C_GREEN}[sidorenko_dotfiles] Install Nix packages? (This might take a while) [y/N] ${C_RESET}"

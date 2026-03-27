@@ -272,6 +272,11 @@ ppath() { tr ':' '\n' <<<"$PATH" | nl -ba; }
 # REQUIRED TOOLS CHECK
 # =============================================================================
 
+# True if a graphical environment is available (macOS, X11, or Wayland).
+has_gui() {
+  [[ -n "${DISPLAY-}" || -n "${WAYLAND_DISPLAY-}" || "$(uname)" == "Darwin" ]]
+}
+
 __require_tools() {
   local missing=""
   local t
@@ -324,8 +329,8 @@ __require_tools \
   zoxide \
   zstd
 
-# Linux-only tools (Wayland/X11 clipboard)
-if [[ "$(uname)" == "Linux" ]]; then
+# Linux GUI-only tools (Wayland/X11 clipboard)
+if [[ "$(uname)" == "Linux" ]] && has_gui; then
   __require_tools \
     wl-copy \
     xclip

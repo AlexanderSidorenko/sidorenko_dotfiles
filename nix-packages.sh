@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Canonical list of Nix packages.
 # Sourced by install.sh and shrc (nix_reinstall).
+# Expects has_gui() to be defined by the caller.
 
 NIX_PACKAGES=(
   ast-grep
@@ -42,8 +43,8 @@ NIX_PACKAGES=(
   zstd
 )
 
-# Linux-only packages (Wayland/X11 clipboard tools)
-if [[ "$(uname)" == "Linux" ]]; then
+# Linux GUI-only packages (Wayland/X11 clipboard tools)
+if [[ "$(uname)" == "Linux" ]] && has_gui; then
   NIX_PACKAGES+=(
     wl-clipboard
     xclip
