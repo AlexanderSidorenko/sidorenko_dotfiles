@@ -530,17 +530,21 @@ nix_reinstall() {
     return 1
   fi
 
+  echo "Querying installed packages..."
+  local installed
+  installed="$(nix-env -q)"
+  if [[ -n "$installed" ]]; then
+    echo "$installed"
+    echo ""
+    echo "Uninstalling all packages..."
+    nix-env -e '*'
+  else
+    echo "(none)"
+  fi
+
   # shellcheck source=nix-packages.sh
   local NIX_PACKAGES=()
   source "$pkg_file"
-
-  local installed desired
-  installed="$(nix-env -q | sort)"
-  desired="$(printf '%s\n' "${NIX_PACKAGES[@]}" | sort)"
-
-  echo "=== Diff (< installed, > desired) ==="
-  diff <(echo "$installed") <(echo "$desired") || true
-  echo ""
 
   local nix_args=()
   local pkg
@@ -548,6 +552,7 @@ nix_reinstall() {
     nix_args+=("nixpkgs.$pkg")
   done
 
+  echo ""
   echo "Installing ${#NIX_PACKAGES[@]} packages..."
   nix-env -iA "${nix_args[@]}"
   echo "Done."
