@@ -285,9 +285,44 @@ __require_tools() {
 }
 
 __require_tools \
-  eza bat rg moor less zoxide fzf fd \
-  delta duf ncdu tldr jq nvim pv tig git mc ranger direnv \
-  ctags fish luarocks lua lazygit curl
+  ast-grep \
+  bat \
+  cmark-gfm \
+  cscope \
+  ctags \
+  curl \
+  delta \
+  direnv \
+  duf \
+  eza \
+  fd \
+  fish \
+  fzf \
+  git \
+  jq \
+  lazygit \
+  less \
+  lua \
+  luarocks \
+  mc \
+  moor \
+  mosh \
+  ncdu \
+  nvim \
+  pv \
+  qrencode \
+  ranger \
+  rg \
+  sshpass \
+  tig \
+  tldr \
+  tmux \
+  tree \
+  wget \
+  wl-copy \
+  xclip \
+  zoxide \
+  zstd
 
 # =============================================================================
 # COLORS AND COSMETICS

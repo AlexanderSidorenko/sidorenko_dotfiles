@@ -566,6 +566,7 @@ install_nix_packages() {
   NIX_PACKAGES=(
     ast-grep
     bat
+    cmark-gfm
     coreutils
     cscope
     delta
@@ -582,6 +583,7 @@ install_nix_packages() {
     luarocks
     mc
     moor
+    mosh
     ncdu
     neovim
     pv
@@ -592,6 +594,7 @@ install_nix_packages() {
     tig
     tldr
     tmux
+    tree
     universal-ctags
     wget
     wl-clipboard
