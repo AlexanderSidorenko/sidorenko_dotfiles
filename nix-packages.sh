@@ -6,6 +6,7 @@
 NIX_PACKAGES=(
   ast-grep
   bat
+  cargo
   cmark-gfm
   coreutils
   cscope
