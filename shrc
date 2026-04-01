@@ -373,7 +373,7 @@ alias fgrep='rg --color=always -F'
 # PAGER: Use 'moor'
 export PAGER="moor"
 export MANPAGER="moor"
-export MOOR="--no-linenumbers --statusbar=bold"
+export MOOR="--no-linenumbers --statusbar=bold --mousemode=scroll"
 alias less='moor'
 
 # Shortcuts
