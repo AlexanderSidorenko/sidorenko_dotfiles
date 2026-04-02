@@ -424,6 +424,29 @@ if command -v journalctl >/dev/null 2>&1; then
   alias jctl='journalctl -xe --no-pager'
 fi
 
+trace-symlink() {
+  if [[ $# -ne 1 ]]; then
+    echo "usage: trace-symlink <path>" >&2
+    return 1
+  fi
+  local p="$1"
+  while true; do
+    if [[ -L "$p" ]]; then
+      local target="$(readlink -- "$p")"
+      # resolve relative targets
+      [[ "$target" != /* ]] && target="$(dirname -- "$p")/$target"
+      printf '🔗 \033[36m%s\033[0m -> \033[33m%s\033[0m\n' "$p" "$target"
+      p="$target"
+    elif [[ -e "$p" ]]; then
+      printf '✅ \033[32m%s\033[0m\n' "$p"
+      break
+    else
+      printf '❌ \033[31m%s\033[0m (broken)\n' "$p"
+      break
+    fi
+  done
+}
+
 mkcd() { mkdir -p -- "$1" && cd -- "$1"; }
 cdf() { cd -- "$(dirname -- "$1")"; }
 up() { local n=${1:-1}; while (( n-- > 0 )); do cd .. || return; done; }
