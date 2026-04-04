@@ -28,6 +28,7 @@ NIX_PACKAGES=(
   mosh
   ncdu
   neovim
+  nix
   pv
   qrencode
   ranger
