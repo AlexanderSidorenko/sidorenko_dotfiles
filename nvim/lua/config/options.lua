@@ -17,7 +17,10 @@ vim.opt.ignorecase = true -- Case-insensitive search by default
 vim.opt.smartcase = true -- ...unless the query contains uppercase
 vim.opt.gdefault = true -- Substitute all matches on a line by default (:s///g)
 vim.opt.cursorline = false -- Don't highlight the current line
-vim.opt.colorcolumn = "80" -- Visual line at 80 characters
+vim.opt.colorcolumn = "120" -- Visual line at 120 characters
+vim.opt.textwidth = 120 -- Hard-wrap at 120 columns
+vim.opt.wrap = true -- Soft-wrap long lines visually
+vim.opt.linebreak = true -- Wrap at word boundaries, not mid-word
 vim.opt.background = "dark" -- Force Neovim to always use Dark Mode
 
 -- Normal Line Numbers
