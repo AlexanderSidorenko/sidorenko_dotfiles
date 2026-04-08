@@ -157,27 +157,34 @@ if [ -n "$ZSH_VERSION" ]; then
         source <(fzf --zsh)
     fi
 
-    # --- Zsh Plugins (installed via Nix) ---
-    # fzf-tab: replace zsh's completion menu with fzf. MUST be sourced before
-    # syntax highlighting and after compinit.
+    # --- Zsh Plugins ---
+    # Installed via the distro package manager (apt/brew) so they share the
+    # same glibc ABI as the system zsh process. Nix-built zsh modules are
+    # avoided here because they may require a newer glibc than the host's
+    # /usr/bin/zsh was linked against. fzf-tab is git-cloned (no native module
+    # built) by install.sh into ~/.local/share/zsh-fzf-tab.
+
+    # fzf-tab: replace zsh's completion menu with fzf. Source BEFORE syntax
+    # highlighting and AFTER compinit (already loaded above).
     for __p in \
-        "$HOME/.nix-profile/share/fzf-tab/fzf-tab.plugin.zsh" \
-        "$HOME/.nix-profile/share/zsh/site-functions/fzf-tab.plugin.zsh"; do
+        "$HOME/.local/share/zsh-fzf-tab/fzf-tab.plugin.zsh"; do
         [[ -r "$__p" ]] && { source "$__p"; break; }
     done
 
     # zsh-autosuggestions: fish-style inline suggestions from history.
     for __p in \
-        "$HOME/.nix-profile/share/zsh-autosuggestions/zsh-autosuggestions.zsh" \
-        "$HOME/.nix-profile/share/zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh"; do
+        /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh \
+        /opt/homebrew/share/zsh-autosuggestions/zsh-autosuggestions.zsh \
+        /usr/local/share/zsh-autosuggestions/zsh-autosuggestions.zsh; do
         [[ -r "$__p" ]] && { source "$__p"; break; }
     done
 
-    # fast-syntax-highlighting: real-time command-line syntax coloring.
+    # zsh-syntax-highlighting: real-time command-line syntax coloring.
     # MUST be sourced last (after autosuggestions and any other ZLE widgets).
     for __p in \
-        "$HOME/.nix-profile/share/zsh/site-functions/fast-syntax-highlighting.plugin.zsh" \
-        "$HOME/.nix-profile/share/zsh-fast-syntax-highlighting/fast-syntax-highlighting.plugin.zsh"; do
+        /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh \
+        /opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh \
+        /usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh; do
         [[ -r "$__p" ]] && { source "$__p"; break; }
     done
     unset __p

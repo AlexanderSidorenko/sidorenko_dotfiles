@@ -405,6 +405,85 @@ install_tmux() {
   symlink_prompt "$src" "$dest"
 }
 
+# Install zsh plugins via the system package manager (NOT Nix).
+#
+# Rationale: the login shell is the distro's /usr/bin/zsh (so chsh can point at
+# a path listed in /etc/shells). That zsh process is linked against the system
+# glibc. Any zsh module loaded into it (zmodload) must also be ABI-compatible
+# with the system glibc — Nix-built .so plugins (notably fzf-tab's fzftab.so)
+# may require a newer glibc than the host provides and fail to load.
+#
+# Distro packages are built against the same glibc as system zsh, so they Just
+# Work. fzf-tab is not packaged by most distros, so we git-clone it (it's pure
+# shell when its optional .so isn't built).
+install_zsh_plugins() {
+  local installed_via=""
+
+  if [[ "$(uname)" == "Linux" ]] && command -v apt &>/dev/null; then
+    local apt_pkgs=(zsh-autosuggestions zsh-syntax-highlighting)
+    local missing=()
+    local p
+    for p in "${apt_pkgs[@]}"; do
+      dpkg -s "$p" &>/dev/null || missing+=("$p")
+    done
+    if (( ${#missing[@]} > 0 )); then
+      local prompt="${C_GREEN}[sidorenko_dotfiles] Install zsh plugins via apt: ${C_BLUE}${missing[*]}${C_GREEN}? [Y/n] ${C_RESET}"
+      if confirm_yes_no "$prompt" Y; then
+        if sudo apt update && sudo apt install -y "${missing[@]}"; then
+          installed_via="apt"
+        else
+          warn "Could not install zsh plugins with apt."
+        fi
+      fi
+    else
+      installed_via="apt"
+    fi
+  elif [[ "$(uname)" == "Darwin" ]] && command -v brew &>/dev/null; then
+    local brew_pkgs=(zsh-autosuggestions zsh-syntax-highlighting)
+    local missing=()
+    local p
+    for p in "${brew_pkgs[@]}"; do
+      brew list --formula "$p" &>/dev/null || missing+=("$p")
+    done
+    if (( ${#missing[@]} > 0 )); then
+      local prompt="${C_GREEN}[sidorenko_dotfiles] Install zsh plugins via brew: ${C_BLUE}${missing[*]}${C_GREEN}? [Y/n] ${C_RESET}"
+      if confirm_yes_no "$prompt" Y; then
+        if brew install "${missing[@]}"; then
+          installed_via="brew"
+        else
+          warn "Could not install zsh plugins with brew."
+        fi
+      fi
+    else
+      installed_via="brew"
+    fi
+  else
+    warn "No supported package manager (apt/brew) for zsh plugins; skipping."
+  fi
+
+  if [[ -n "$installed_via" ]]; then
+    log "zsh plugins available via $(name "$installed_via")"
+  fi
+
+  # fzf-tab: not packaged by apt/brew. Git-clone the upstream repo.
+  # The optional native module (fzftab.so) is NOT built — pure shell only,
+  # which is what we want for ABI safety.
+  local fzftab_dir="${HOME}/.local/share/zsh-fzf-tab"
+  if [[ -d "$fzftab_dir/.git" ]]; then
+    log "fzf-tab already cloned at $(name "$fzftab_dir"); pulling..."
+    git -C "$fzftab_dir" pull --ff-only &>/dev/null || warn "fzf-tab: git pull failed"
+  else
+    if command -v git &>/dev/null; then
+      log "Cloning fzf-tab into $(name "$fzftab_dir")"
+      mkdir -p "$(dirname "$fzftab_dir")"
+      git clone --depth=1 https://github.com/Aloxaf/fzf-tab "$fzftab_dir" &>/dev/null \
+        || warn "Could not clone fzf-tab"
+    else
+      warn "git not available; skipping fzf-tab clone"
+    fi
+  fi
+}
+
 maybe_switch_default_shell_to_zsh() {
   local current_shell=""
   local current_shell_base=""
@@ -654,6 +733,7 @@ main() {
   install_wezterm
   install_tmux
   install_ssh_config
+  install_zsh_plugins
   if has_gui; then
     make_keyboard_snappy
   else
