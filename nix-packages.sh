@@ -42,6 +42,9 @@ NIX_PACKAGES=(
   universal-ctags
   wget
   zoxide
+  zsh-autosuggestions
+  zsh-fast-syntax-highlighting
+  zsh-fzf-tab
   zstd
 )
 

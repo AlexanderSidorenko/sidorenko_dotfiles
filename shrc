@@ -157,6 +157,31 @@ if [ -n "$ZSH_VERSION" ]; then
         source <(fzf --zsh)
     fi
 
+    # --- Zsh Plugins (installed via Nix) ---
+    # fzf-tab: replace zsh's completion menu with fzf. MUST be sourced before
+    # syntax highlighting and after compinit.
+    for __p in \
+        "$HOME/.nix-profile/share/fzf-tab/fzf-tab.plugin.zsh" \
+        "$HOME/.nix-profile/share/zsh/site-functions/fzf-tab.plugin.zsh"; do
+        [[ -r "$__p" ]] && { source "$__p"; break; }
+    done
+
+    # zsh-autosuggestions: fish-style inline suggestions from history.
+    for __p in \
+        "$HOME/.nix-profile/share/zsh-autosuggestions/zsh-autosuggestions.zsh" \
+        "$HOME/.nix-profile/share/zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh"; do
+        [[ -r "$__p" ]] && { source "$__p"; break; }
+    done
+
+    # fast-syntax-highlighting: real-time command-line syntax coloring.
+    # MUST be sourced last (after autosuggestions and any other ZLE widgets).
+    for __p in \
+        "$HOME/.nix-profile/share/zsh/site-functions/fast-syntax-highlighting.plugin.zsh" \
+        "$HOME/.nix-profile/share/zsh-fast-syntax-highlighting/fast-syntax-highlighting.plugin.zsh"; do
+        [[ -r "$__p" ]] && { source "$__p"; break; }
+    done
+    unset __p
+
 elif [ -n "$BASH_VERSION" ]; then
     # -------------------------------------------------------------------------
     # BASH CONFIGURATION
@@ -172,7 +197,6 @@ elif [ -n "$BASH_VERSION" ]; then
     shopt -s extglob                # Enable extended globbing patterns
     shopt -s nocaseglob             # Case-insensitive globbing
     shopt -s direxpand              # Expand variables during path completion
-    shopt -s expand_aliases         # Expand aliases in non-interactive shells
 
     # --- History (Bash Native) ---
     export HISTSIZE=200000
@@ -277,64 +301,34 @@ has_gui() {
   [[ -n "${DISPLAY-}" || -n "${WAYLAND_DISPLAY-}" || "$(uname)" == "Darwin" ]]
 }
 
-__require_tools() {
-  local missing=""
-  local t
-  for t in "$@"; do
-    command -v "$t" >/dev/null 2>&1 || missing="${missing} $t"
+# dotfiles_doctor: on-demand check that required CLI tools are present.
+# Runs only when invoked (not on every shell startup, which is slow on cold/SSH boxes).
+dotfiles_doctor() {
+  local tools=(
+    ast-grep bat cmark-gfm cscope ctags curl delta direnv duf et eza fd
+    fish fzf git jq lazygit less lua luarocks mc moor mosh ncdu nvim pv
+    qrencode ranger rg sshpass tig tldr tmux tree tree-sitter wget zoxide zstd
+  )
+  if [[ "$(uname)" == "Linux" ]] && has_gui; then
+    tools+=(wl-copy xclip)
+  fi
+
+  local missing=() present=() t
+  for t in "${tools[@]}"; do
+    if command -v "$t" >/dev/null 2>&1; then
+      present+=("$t")
+    else
+      missing+=("$t")
+    fi
   done
-  if [[ -n "$missing" ]]; then
-    echo "dotfiles: missing required tools:${missing}" >&2
+
+  printf 'dotfiles_doctor: %d/%d tools present\n' "${#present[@]}" "${#tools[@]}"
+  if (( ${#missing[@]} > 0 )); then
+    printf '  missing: %s\n' "${missing[*]}" >&2
     return 1
   fi
+  return 0
 }
-
-__require_tools \
-  ast-grep \
-  bat \
-  cmark-gfm \
-  cscope \
-  ctags \
-  curl \
-  delta \
-  direnv \
-  duf \
-  et \
-  eza \
-  fd \
-  fish \
-  fzf \
-  git \
-  jq \
-  lazygit \
-  less \
-  lua \
-  luarocks \
-  mc \
-  moor \
-  mosh \
-  ncdu \
-  nvim \
-  pv \
-  qrencode \
-  ranger \
-  rg \
-  sshpass \
-  tig \
-  tldr \
-  tmux \
-  tree \
-  tree-sitter \
-  wget \
-  zoxide \
-  zstd
-
-# Linux GUI-only tools (Wayland/X11 clipboard)
-if [[ "$(uname)" == "Linux" ]] && has_gui; then
-  __require_tools \
-    wl-copy \
-    xclip
-fi
 
 # =============================================================================
 # COLORS AND COSMETICS
@@ -362,13 +356,11 @@ alias ll='eza -lah --group-directories-first'
 alias la='eza -a --group-directories-first'
 alias l='eza -F --group-directories-first'
 
-# CAT: Use 'bat'
-alias cat='bat --paging=never -p'
 
-# GREP: Use ripgrep
-alias grep='rg --color=always'
-alias egrep='rg --color=always'
-alias fgrep='rg --color=always -F'
+# GREP: keep `grep` as grep (POSIX-compatible flags). Use `rg` directly for ripgrep.
+alias grep='grep --color=auto'
+alias egrep='grep -E --color=auto'
+alias fgrep='grep -F --color=auto'
 
 # PAGER: Use 'moor'
 export PAGER="moor"
