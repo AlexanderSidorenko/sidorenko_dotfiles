@@ -1,4 +1,5 @@
-# Use OSC-52 to allow remote clients on the other size of SSH copy into system's local clipboard.
+-- Use OSC-52 to allow remote clients on the other side of SSH to copy into the
+-- local system clipboard.
 return {
   "ojroques/nvim-osc52",
   lazy = false,

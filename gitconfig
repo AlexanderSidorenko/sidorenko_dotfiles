@@ -11,8 +11,12 @@
 [diff]
     # If you explicitly run 'git difftool' (or 'git d'), use Neovim
     tool = nvimdiff
-    # Helps Delta detect moved blocks of code (better coloring)
-    colorMoved = default
+    # Better hunks than default Myers, especially for refactors
+    algorithm = histogram
+    # Highlight moved blocks of code distinctly from add/delete
+    colorMoved = zebra
+    # Treat re-indented moves as moves (not delete+add)
+    colorMovedWS = allow-indentation-change
 
 [difftool]
     # Don't ask confirmation before opening Neovim
@@ -21,10 +25,6 @@
 [difftool "nvimdiff"]
     # Explicitly use Neovim in diff mode
     cmd = nvim -d "$LOCAL" "$REMOTE"
-
-[merge]
-    # Use Neovim for resolving conflicts ('git mergetool')
-    tool = nvimdiff
 
 [mergetool]
     # Don't keep .orig backup files after resolving conflicts
@@ -57,3 +57,66 @@
     side-by-side = true  # clearer side-by-side comparison
     line-numbers = true  # show line numbers
     syntax-theme = Dracula # Matches modern dark terminals well
+    hyperlinks = true    # OSC8 clickable file paths (works in wezterm)
+
+[merge]
+    # Use Neovim for resolving conflicts ('git mergetool')
+    tool = nvimdiff
+    # Show common ancestor in conflict markers (3-way) — much easier to resolve
+    conflictStyle = zdiff3
+
+[rerere]
+    # Remember conflict resolutions and replay them automatically next time
+    enabled = true
+
+[rebase]
+    # Stash dirty tree before rebase, reapply after — never get blocked
+    autoStash = true
+    # Auto-fixup commits made with --fixup= during interactive rebase
+    autoSquash = true
+    # Update intermediate branch refs when rebasing stacked branches (Git ≥ 2.38)
+    updateRefs = true
+
+[pull]
+    # Always rebase on pull — linear history, no merge noise
+    rebase = true
+
+[push]
+    # Push only the current branch to its upstream
+    default = simple
+    # Auto --set-upstream on first push of a new branch (Git ≥ 2.37)
+    autoSetupRemote = true
+    # Push annotated tags reachable from pushed commits
+    followTags = true
+
+[fetch]
+    # Parallel fetches across remotes (0 = use all cores)
+    parallel = 0
+
+[column]
+    # Multi-column output for git branch / tag / status when terminal is wide
+    ui = auto
+
+[branch]
+    # Sort `git branch` by most-recently-committed first
+    sort = -committerdate
+
+[tag]
+    # Sort tags by semver, not lexicographically (v1.10 > v1.9)
+    sort = version:refname
+
+[commit]
+    # Show full diff in commit message editor
+    verbose = true
+
+[help]
+    # Prompt before running auto-corrected typo'd commands
+    autocorrect = prompt
+
+[submodule]
+    # Auto-update submodules on checkout/pull/etc.
+    recurse = true
+
+[transfer]
+    # Verify object integrity on transfer
+    fsckObjects = true

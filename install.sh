@@ -364,6 +364,39 @@ install_wezterm() {
   symlink_prompt "$src" "$dest"
 }
 
+install_ssh_config() {
+  local src="${DOTDIR}/ssh_config"
+  local user_ssh_dir="${HOME}/.ssh"
+  local user_ssh_config="${user_ssh_dir}/config"
+
+  [[ -e "$src" ]] || die "Missing ssh_config: $(name "$src")"
+
+  mkdir -p "$user_ssh_dir"
+  chmod 700 "$user_ssh_dir"
+  touch "$user_ssh_config"
+  chmod 600 "$user_ssh_config"
+
+  local include_line="Include ~/.sidorenko_dotfiles/ssh_config"
+  if grep -qF "$include_line" "$user_ssh_config"; then
+    log "$(name "$user_ssh_config") already includes sidorenko_dotfiles ssh_config"
+    return 0
+  fi
+
+  log "Prepending Include block to $(name "$user_ssh_config")"
+  # Include must come BEFORE any Host blocks to allow per-host overrides
+  # in user's config (first match wins in OpenSSH).
+  local tmp
+  tmp="$(mktemp)"
+  {
+    printf '# >>> sidorenko_dotfiles >>>\n'
+    printf '%s\n' "$include_line"
+    printf '# <<< sidorenko_dotfiles <<<\n\n'
+    cat "$user_ssh_config"
+  } >"$tmp"
+  mv "$tmp" "$user_ssh_config"
+  chmod 600 "$user_ssh_config"
+}
+
 install_tmux() {
   local src="${DOTDIR}/tmux.conf"
   local dest="${HOME}/.tmux.conf"
@@ -620,6 +653,7 @@ main() {
   install_mc_keymap
   install_wezterm
   install_tmux
+  install_ssh_config
   if has_gui; then
     make_keyboard_snappy
   else
