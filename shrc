@@ -282,7 +282,8 @@ dotfiles_doctor() {
   local tools=(
     ast-grep bat cmark-gfm cscope ctags curl delta direnv duf et eza fd
     fish fzf git jq lazygit less lua luarocks mc moor mosh ncdu nvim pv
-    qrencode ranger rg sshpass tig tldr tmux tree tree-sitter wget zoxide zstd
+    qrencode ranger rg sshpass tig tldr tmux tokei tree tree-sitter wget
+    zoxide zstd
   )
   if [[ "$(uname)" == "Linux" ]] && has_gui; then
     tools+=(wl-copy xclip)

@@ -37,6 +37,7 @@ NIX_PACKAGES=(
   tig
   tldr
   tmux
+  tokei
   tree
   tree-sitter
   universal-ctags
