@@ -497,6 +497,36 @@ whop() {
   fi
 }
 
+# Securely shred all files in a directory, then remove the directory tree.
+# Each file is overwritten 5 times via shred(1) before unlink. IRREVERSIBLE.
+# Note: shred's guarantees are weaker on COW/journaling FSes (btrfs, zfs, ext4 journal).
+# Usage: shred-folder <dir>
+shred-folder() {
+  local dir="$1"
+  [[ -n "$dir" ]] || { echo "usage: shred-folder <dir>" >&2; return 2; }
+  [[ -d "$dir" ]] || { echo "shred-folder: not a directory: $dir" >&2; return 1; }
+  command -v shred >/dev/null 2>&1 || { echo "shred-folder: shred(1) not found" >&2; return 1; }
+
+  local abs
+  abs="$(cd -- "$dir" && pwd -P)" || return 1
+  case "$abs" in
+    /|"$HOME"|/home|/root|/etc|/usr|/var|/bin|/sbin|/lib|/lib64|/boot|/opt|/srv|/tmp)
+      echo "shred-folder: refusing to operate on protected path: $abs" >&2
+      return 1
+      ;;
+  esac
+
+  local count
+  count="$(find "$abs" -type f | wc -l)"
+  printf 'About to shred %d file(s) under: %s\nThis is IRREVERSIBLE. Continue? [y/N] ' "$count" "$abs"
+  local reply
+  read -r reply
+  [[ "$reply" == "y" || "$reply" == "Y" ]] || { echo "Aborted."; return 1; }
+
+  find "$abs" -type f -exec shred -n 5 -u {} +
+  command rm -rf -- "$abs"
+}
+
 fzf-kill() {
   local selected
   selected="$(ps aux | fzf -i -m --header-lines=1 --header="Select process(es) to kill (Tab to multi-select)")"
