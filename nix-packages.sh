@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Canonical list of Nix packages.
-# Sourced by install.sh and shrc (nix_reinstall).
-# Expects has_gui() to be defined by the caller.
+# Canonical list of Nix packages plus install/reinstall helpers.
+# Sourced by install.sh and shrc; defines NIX_PACKAGES, nix_install, nix_reinstall.
 
 NIX_PACKAGES=(
   ast-grep
@@ -51,10 +50,51 @@ NIX_PACKAGES=(
   zstd
 )
 
-# Linux GUI-only packages (Wayland/X11 clipboard tools)
-if [[ "$(uname)" == "Linux" ]] && has_gui; then
+# Linux GUI-only packages (Wayland/X11 clipboard tools).
+# has_gui is defined by install.sh; in interactive shells we just skip the gate.
+if [[ "$(uname)" == "Linux" ]] && declare -f has_gui >/dev/null 2>&1 && has_gui; then
   NIX_PACKAGES+=(
     wl-clipboard
     xclip
   )
 fi
+
+# Install/upgrade every package in NIX_PACKAGES via nix-env -iA.
+# Idempotent: re-running upgrades existing installs and adds missing ones.
+nix_install() {
+  if ! command -v nix-env >/dev/null 2>&1; then
+    echo "nix_install: nix-env not found" >&2
+    return 1
+  fi
+
+  local nix_args=() pkg
+  for pkg in "${NIX_PACKAGES[@]}"; do
+    nix_args+=("nixpkgs.$pkg")
+  done
+
+  echo "Installing ${#NIX_PACKAGES[@]} packages..."
+  nix-env -iA "${nix_args[@]}"
+}
+
+# Wipe every nix-env package, then reinstall from NIX_PACKAGES.
+nix_reinstall() {
+  if ! command -v nix-env >/dev/null 2>&1; then
+    echo "nix_reinstall: nix-env not found" >&2
+    return 1
+  fi
+
+  echo "Querying installed packages..."
+  local installed
+  installed="$(nix-env -q)"
+  if [[ -n "$installed" ]]; then
+    echo "$installed"
+    echo ""
+    echo "Uninstalling all packages..."
+    nix-env -e '*'
+  else
+    echo "(none)"
+  fi
+
+  echo ""
+  nix_install
+}

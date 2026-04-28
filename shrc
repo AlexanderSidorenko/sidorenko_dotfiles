@@ -301,6 +301,13 @@ has_gui() {
   [[ -n "${DISPLAY-}" || -n "${WAYLAND_DISPLAY-}" || "$(uname)" == "Darwin" ]]
 }
 
+# Define nix_install / nix_reinstall (and populate $NIX_PACKAGES) from the
+# canonical package list. Sourced after has_gui so the GUI-only packages get
+# included on Linux desktops.
+__nix_packages_file="${SIDORENKO_DOTFILES:-$HOME/.sidorenko_dotfiles}/nix-packages.sh"
+[[ -r "$__nix_packages_file" ]] && source "$__nix_packages_file"
+unset __nix_packages_file
+
 # dotfiles_doctor: on-demand check that required CLI tools are present.
 # Runs only when invoked (not on every shell startup, which is slow on cold/SSH boxes).
 dotfiles_doctor() {
@@ -560,48 +567,6 @@ fzf-kill() {
   pids="$(echo "$selected" | awk '{print $2}')"
   echo "$selected" | awk '{print "Killing: " $11, "(" $2 ")"}'
   echo "$pids" | xargs kill
-}
-
-# Full reinstall of Nix packages: diff installed vs desired, then install all.
-nix_reinstall() {
-  local dotdir="${SIDORENKO_DOTFILES:-$HOME/.sidorenko_dotfiles}"
-  local pkg_file="${dotdir}/nix-packages.sh"
-
-  if [[ ! -r "$pkg_file" ]]; then
-    echo "nix_reinstall: package list not found: $pkg_file" >&2
-    return 1
-  fi
-  if ! command -v nix-env >/dev/null 2>&1; then
-    echo "nix_reinstall: nix-env not found" >&2
-    return 1
-  fi
-
-  echo "Querying installed packages..."
-  local installed
-  installed="$(nix-env -q)"
-  if [[ -n "$installed" ]]; then
-    echo "$installed"
-    echo ""
-    echo "Uninstalling all packages..."
-    nix-env -e '*'
-  else
-    echo "(none)"
-  fi
-
-  # shellcheck source=nix-packages.sh
-  local NIX_PACKAGES=()
-  source "$pkg_file"
-
-  local nix_args=()
-  local pkg
-  for pkg in "${NIX_PACKAGES[@]}"; do
-    nix_args+=("nixpkgs.$pkg")
-  done
-
-  echo ""
-  echo "Installing ${#NIX_PACKAGES[@]} packages..."
-  nix-env -iA "${nix_args[@]}"
-  echo "Done."
 }
 
 # =============================================================================

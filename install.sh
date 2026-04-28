@@ -615,24 +615,12 @@ install_nix_packages() {
     log "  - $(name "$pkg")"
   done
 
-  # Install packages using nix-env
-  # The -A flag allows specifying attribute paths, which is often more precise.
-  # For simple package names, it's usually just the name itself.
   if ! command -v nix-env &>/dev/null; then
     warn "nix-env command not found. Skipping Nix package installation."
     return 1
   fi
 
-  # Construct the string for nix-env -iA
-  # Each package should be prefixed with 'nixpkgs.'
-  NIX_INSTALL_ARGS=()
-  for pkg in "${NIX_PACKAGES[@]}"; do
-    NIX_INSTALL_ARGS+=("nixpkgs.$pkg")
-  done
-
-  log "Running: nix-env -iA ${NIX_INSTALL_ARGS[*]}"
-  nix-env -iA "${NIX_INSTALL_ARGS[@]}"
-
+  nix_install
   log "Nix package installation complete."
 }
 
