@@ -124,6 +124,14 @@ if [ -n "$ZSH_VERSION" ]; then
     bindkey "^[[A" up-line-or-beginning-search
     bindkey "^[[B" down-line-or-beginning-search
 
+    # Modified-arrow sequences are an xterm extension; zsh's default emacs keymap predates them.
+    bindkey "^[[1;5C" forward-word          # Ctrl+Right
+    bindkey "^[[1;5D" backward-word         # Ctrl+Left
+    bindkey "^[[3;5~" kill-word             # Ctrl+Delete
+    bindkey "^H"      backward-kill-word    # Ctrl+Backspace (terminals send ^H here; plain Backspace sends ^?)
+    bindkey "^[[H"    beginning-of-line     # Home (xterm/CSI form; ^[[1~ is the linux/rxvt form)
+    bindkey "^[[F"    end-of-line           # End  (xterm/CSI form; ^[[4~ is the linux/rxvt form)
+
     # --- Prompt (Zsh Native) ---
     setopt prompt_subst
     
