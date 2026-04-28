@@ -6,8 +6,10 @@
 NIX_PACKAGES=(
   ast-grep
   bat
+  caligula
   cargo
   cmark-gfm
+  cyme
   coreutils
   cscope
   delta
@@ -21,6 +23,7 @@ NIX_PACKAGES=(
   git
   jq
   lazygit
+  lstr
   lua
   luarocks
   mc
