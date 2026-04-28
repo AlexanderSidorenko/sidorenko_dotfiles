@@ -111,6 +111,14 @@ if [ -n "$ZSH_VERSION" ]; then
     setopt glob_complete
     # Sort files by name and mark symlinked dirs with a slash
     zstyle ':completion:*' file-sort name
+    # Cache completion data to speed up subsequent invocations
+    zstyle ':completion:*' use-cache on
+    zstyle ':completion:*' cache-path "${XDG_CACHE_HOME:-$HOME/.cache}/zsh/zcompcache"
+    # Group matches by category with a labeled header
+    zstyle ':completion:*' group-name ''
+    zstyle ':completion:*:descriptions' format '%F{cyan}── %d ──%f'
+    # Colourise file completions using LS_COLORS
+    zstyle ':completion:*' list-colors "${(s.:.)LS_COLORS}"
 
     # --- Key Bindings ---
     bindkey -e  # Emacs mode
@@ -164,6 +172,15 @@ if [ -n "$ZSH_VERSION" ]; then
     if command -v fzf >/dev/null 2>&1; then
         source <(fzf --zsh)
     fi
+
+    # zsh-autosuggestions: fish-style ghost text from history.
+    [[ -f "$HOME/.nix-profile/share/zsh-autosuggestions/zsh-autosuggestions.zsh" ]] \
+        && source "$HOME/.nix-profile/share/zsh-autosuggestions/zsh-autosuggestions.zsh"
+
+    # zsh-syntax-highlighting: must be sourced LAST — it hooks ZLE and won't
+    # colourise widgets defined after it.
+    [[ -f "$HOME/.nix-profile/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]] \
+        && source "$HOME/.nix-profile/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
 
 elif [ -n "$BASH_VERSION" ]; then
     # -------------------------------------------------------------------------
