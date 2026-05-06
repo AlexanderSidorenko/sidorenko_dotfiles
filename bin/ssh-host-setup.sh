@@ -37,7 +37,10 @@ prompt() {
   printf "%b%s%b" "$GREEN" "$1" "$RESET"
 }
 
-default_username="$(id -un)"
+# id -un can fail on AD-joined hosts when sssd/winbind NSS lookups break.
+# Fall back to $USER / $LOGNAME; if all empty, the prompt below will require input.
+default_username="$(id -un 2>/dev/null || true)"
+default_username="${default_username:-${USER:-${LOGNAME:-}}}"
 hostname_full="$(hostname)"
 
 prompt "Friendly name for SSH host: "
@@ -54,9 +57,17 @@ if [[ -z "${address_line}" ]]; then
   exit 1
 fi
 
-printf "%bUsername [%b%s%b]: %b" "$GREEN" "$BLUE" "${default_username}" "$GREEN" "$RESET"
+if [[ -n "${default_username}" ]]; then
+  printf "%bUsername [%b%s%b]: %b" "$GREEN" "$BLUE" "${default_username}" "$GREEN" "$RESET"
+else
+  prompt "Username: "
+fi
 read -r username
 username="${username:-$default_username}"
+if [[ -z "${username}" ]]; then
+  green "Username is required."
+  exit 1
+fi
 
 prompt "Key algorithm [ed25519]: "
 read -r algorithm
