@@ -364,14 +364,16 @@ install_mc_keymap() {
   symlink_prompt "$src" "$dest"
 }
 
-install_wezterm() {
-  local wezterm_dir="${HOME}/.config/wezterm"
-  local src="${DOTDIR}/wezterm/wezterm.lua"
-  local dest="${wezterm_dir}/wezterm.lua"
+install_alacritty() {
+  # Alacritty itself is installed manually (not via Nix on Ubuntu — its OpenGL
+  # stack doesn't play nice with Nix). We only manage the config here.
+  local alacritty_dir="${HOME}/.config/alacritty"
+  local src="${DOTDIR}/alacritty/alacritty.toml"
+  local dest="${alacritty_dir}/alacritty.toml"
 
-  [[ -e "$src" ]] || die "Missing wezterm config: $(name "$src")"
+  [[ -e "$src" ]] || die "Missing alacritty config: $(name "$src")"
 
-  ensure_dir_prompt "$wezterm_dir" || return 0
+  ensure_dir_prompt "$alacritty_dir" || return 0
   symlink_prompt "$src" "$dest"
 }
 
@@ -703,6 +705,28 @@ maybe_configure_gnome() {
   log "GNOME tweaks applied. Log out and back in for all changes to take effect."
 }
 
+install_nvim_plugins() {
+  # Pin plugins to the commits in nvim/lazy-lock.json. Without this, lazy.nvim
+  # auto-installs missing plugins at the latest branch commit and overwrites
+  # the lockfile, defeating reproducibility.
+  if ! command -v nvim &>/dev/null; then
+    log "Skipping nvim plugin restore: nvim not installed."
+    return 0
+  fi
+
+  if [[ ! -f "${DOTDIR}/nvim/lazy-lock.json" ]]; then
+    log "Skipping nvim plugin restore: no lazy-lock.json."
+    return 0
+  fi
+
+  log "Restoring nvim plugins to lockfile versions (may take a while on first run)..."
+  if nvim --headless "+Lazy! restore" +qa; then
+    log "nvim plugin restore complete."
+  else
+    warn "nvim plugin restore failed; you can run :Lazy restore manually."
+  fi
+}
+
 # Function to install Nix packages
 install_nix_packages() {
   log "Installing Nix packages..."
@@ -739,7 +763,7 @@ main() {
   fi
   install_ranger
   install_mc_keymap
-  install_wezterm
+  install_alacritty
   install_tmux
   install_ssh_config
   if has_gui; then
@@ -753,6 +777,7 @@ main() {
     log "Skipping GNOME tweaks (headless)"
   fi
   symlink_prompt "${DOTDIR}/nvim" "${HOME}/.config/nvim"
+  install_nvim_plugins
 
   local prompt="${C_GREEN}[sidorenko_dotfiles] Install Nix packages? (This might take a while) [y/N] ${C_RESET}"
   if confirm_yes_no "$prompt" N; then
