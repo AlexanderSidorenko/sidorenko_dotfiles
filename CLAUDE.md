@@ -13,7 +13,7 @@ tmux.conf           — tmux config; prefix Ctrl+Space, vi keys
 ripgreprc           — global rg flags
 tigrc               — tig config
 mc.keymap           — Midnight Commander keymap
-wezterm/            — WezTerm terminal config
+alacritty/          — Alacritty terminal config (TOML; alacritty itself installed manually)
 nvim/               — Neovim config (LazyVim-based, Lua)
 ranger/             — ranger file manager config
 bin/                — custom scripts (clip, ssh-host-setup.sh, neovide)

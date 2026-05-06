@@ -367,14 +367,20 @@ install_mc_keymap() {
 install_alacritty() {
   # Alacritty itself is installed manually (not via Nix on Ubuntu — its OpenGL
   # stack doesn't play nice with Nix). We only manage the config here.
-  local alacritty_dir="${HOME}/.config/alacritty"
-  local src="${DOTDIR}/alacritty/alacritty.toml"
-  local dest="${alacritty_dir}/alacritty.toml"
+  local alacritty_src="${DOTDIR}/alacritty"
+  local alacritty_dest="${HOME}/.config/alacritty"
 
-  [[ -e "$src" ]] || die "Missing alacritty config: $(name "$src")"
+  [[ -d "$alacritty_src" ]] || die "Missing alacritty config dir: $(name "$alacritty_src")"
 
-  ensure_dir_prompt "$alacritty_dir" || return 0
-  symlink_prompt "$src" "$dest"
+  ensure_dir_prompt "$alacritty_dest" || return 0
+
+  local src dest filename
+  for src in "${alacritty_src}"/*; do
+    [[ -e "$src" ]] || continue
+    filename="$(basename "$src")"
+    dest="${alacritty_dest}/${filename}"
+    symlink_prompt "$src" "$dest"
+  done
 }
 
 install_ssh_config() {
