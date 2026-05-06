@@ -25,6 +25,17 @@ has_gui() {
   [[ -n "${DISPLAY-}" || -n "${WAYLAND_DISPLAY-}" || "$(uname)" == "Darwin" ]]
 }
 
+# True if the current session is GNOME (or a GNOME-derived shell like Ubuntu).
+is_gnome() {
+  case "${XDG_CURRENT_DESKTOP-}" in
+  *GNOME* | *gnome*) return 0 ;;
+  esac
+  case "${DESKTOP_SESSION-}" in
+  *gnome* | *GNOME*) return 0 ;;
+  esac
+  return 1
+}
+
 confirm_override() {
   local target="$1"
   local reply
@@ -603,6 +614,95 @@ make_keyboard_snappy() {
   fi
 }
 
+# Set a gsettings key, skipping if the schema or key isn't installed
+# (gsettings writable returns false in both cases).
+gsettings_set() {
+  local schema="$1"
+  local key="$2"
+  local value="$3"
+
+  if gsettings writable "$schema" "$key" >/dev/null 2>&1; then
+    log "Setting $(name "$schema $key") = $(name "$value")"
+    gsettings set "$schema" "$key" "$value"
+  else
+    warn "Skipping non-writable gsettings key: $schema $key"
+  fi
+}
+
+apply_gnome_tweaks() {
+  # gsettings values: outer quotes are shell, inner quoting is the gsettings
+  # type literal (string 'RIGHT', array ['<Super>1'], booleans/ints bare).
+
+  # Fixed 4 workspaces.
+  gsettings_set org.gnome.mutter dynamic-workspaces false
+  gsettings_set org.gnome.desktop.wm.preferences num-workspaces 4
+
+  # Workspaces on all monitors.
+  gsettings_set org.gnome.mutter workspaces-only-on-primary false
+
+  # App switching only within current workspace.
+  gsettings_set org.gnome.shell.app-switcher current-workspace-only true
+
+  # Super + 1..4 switches workspaces; Alt + 1..4 moves window to workspace.
+  local i
+  for i in 1 2 3 4; do
+    gsettings_set org.gnome.desktop.wm.keybindings "switch-to-workspace-$i" "['<Super>$i']"
+    gsettings_set org.gnome.desktop.wm.keybindings "move-to-workspace-$i" "['<Alt>$i']"
+  done
+
+  # Alt + click/drag manipulates windows (move with left, resize with right).
+  gsettings_set org.gnome.desktop.wm.preferences mouse-button-modifier '<Alt>'
+
+  # Disable GNOME Shell Super + number app switching. Clear 1..9, not just
+  # 1..4, so 5..9 stay free if num-workspaces is later raised.
+  for i in 1 2 3 4 5 6 7 8 9; do
+    gsettings_set org.gnome.shell.keybindings "switch-to-application-$i" "[]"
+  done
+
+  # Disable Ubuntu Dock / Dash-to-Dock Super + number app launching.
+  gsettings_set org.gnome.shell.extensions.dash-to-dock hot-keys false
+
+  local kind
+  for kind in app-hotkey app-shift-hotkey app-ctrl-hotkey; do
+    for i in 1 2 3 4 5 6 7 8 9; do
+      gsettings_set org.gnome.shell.extensions.dash-to-dock "$kind-$i" "[]"
+    done
+  done
+
+  # Dock on the right + auto-hide.
+  gsettings_set org.gnome.shell.extensions.dash-to-dock dock-position "'RIGHT'"
+  gsettings_set org.gnome.shell.extensions.dash-to-dock dock-fixed false
+  gsettings_set org.gnome.shell.extensions.dash-to-dock autohide true
+  gsettings_set org.gnome.shell.extensions.dash-to-dock intellihide true
+}
+
+maybe_configure_gnome() {
+  if ! is_gnome; then
+    log "Skipping GNOME tweaks (not a GNOME session)."
+    return 0
+  fi
+
+  if ! command -v gsettings &>/dev/null; then
+    warn "Skipping GNOME tweaks: gsettings not found."
+    return 0
+  fi
+
+  if ! gsettings list-schemas >/dev/null 2>&1; then
+    warn "Skipping GNOME tweaks: gsettings schemas are unavailable."
+    return 0
+  fi
+
+  local prompt="${C_GREEN}[sidorenko_dotfiles] GNOME detected. Apply workspace/keybinding/dock tweaks? [y/N] ${C_RESET}"
+  if ! confirm_yes_no "$prompt" N; then
+    log "Skipped GNOME tweaks."
+    return 0
+  fi
+
+  log "Applying GNOME tweaks..."
+  apply_gnome_tweaks
+  log "GNOME tweaks applied. Log out and back in for all changes to take effect."
+}
+
 # Function to install Nix packages
 install_nix_packages() {
   log "Installing Nix packages..."
@@ -646,6 +746,11 @@ main() {
     make_keyboard_snappy
   else
     log "Skipping keyboard repeat tuning (headless)"
+  fi
+  if has_gui; then
+    maybe_configure_gnome
+  else
+    log "Skipping GNOME tweaks (headless)"
   fi
   symlink_prompt "${DOTDIR}/nvim" "${HOME}/.config/nvim"
 
