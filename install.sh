@@ -630,7 +630,6 @@ gsettings_set() {
   local value="$3"
 
   if gsettings writable "$schema" "$key" >/dev/null 2>&1; then
-    log "Setting $(name "$schema $key") = $(name "$value")"
     gsettings set "$schema" "$key" "$value"
   else
     warn "Skipping non-writable gsettings key: $schema $key"
@@ -682,6 +681,9 @@ apply_gnome_tweaks() {
   gsettings_set org.gnome.shell.extensions.dash-to-dock dock-fixed false
   gsettings_set org.gnome.shell.extensions.dash-to-dock autohide true
   gsettings_set org.gnome.shell.extensions.dash-to-dock intellihide true
+
+  # Disable window/workspace animations.
+  gsettings_set org.gnome.desktop.interface enable-animations false
 }
 
 maybe_configure_gnome() {
