@@ -44,7 +44,7 @@ blinking = "On"
 save_to_clipboard = true
 
 [mouse]
-hide_when_typing = true
+hide_when_typing = false
 
 [bell]
 duration = 0
