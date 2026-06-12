@@ -383,6 +383,26 @@ install_alacritty() {
   done
 }
 
+install_claude() {
+  # Claude Code stores a lot of local state in ~/.claude (sessions, history,
+  # credentials, projects). We only manage the tracked config files, symlinking
+  # each into the existing directory rather than replacing the whole thing.
+  local claude_src="${DOTDIR}/claude"
+  local claude_dest="${HOME}/.claude"
+
+  [[ -d "$claude_src" ]] || die "Missing claude config dir: $(name "$claude_src")"
+
+  ensure_dir_prompt "$claude_dest" || return 0
+
+  local src dest filename
+  for src in "${claude_src}"/*; do
+    [[ -e "$src" ]] || continue
+    filename="$(basename "$src")"
+    dest="${claude_dest}/${filename}"
+    symlink_prompt "$src" "$dest"
+  done
+}
+
 install_ssh_config() {
   local src="${DOTDIR}/ssh_config"
   local user_ssh_dir="${HOME}/.ssh"
@@ -875,6 +895,7 @@ main() {
   install_mc_keymap
   install_alacritty
   install_tmux
+  install_claude
   install_ssh_config
   if has_gui; then
     make_keyboard_snappy

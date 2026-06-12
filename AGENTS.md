@@ -16,6 +16,7 @@ mc.keymap           — Midnight Commander keymap
 alacritty/          — Alacritty terminal config (TOML; alacritty itself installed manually)
 nvim/               — Neovim config (LazyVim-based, Lua)
 ranger/             — ranger file manager config
+claude/             — Claude Code config (settings.json; symlinked into ~/.claude)
 bin/                — custom scripts (clip, ssh-host-setup.sh, neovide)
 ```
 
