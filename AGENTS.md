@@ -62,3 +62,64 @@ bash -n bin/ssh-host-setup.sh && shellcheck bin/ssh-host-setup.sh
 - Tool integrations (fzf, zoxide, etc.) are guarded with `command -v` checks; keep this consistent for new additions.
 - New tools that should be installed by default go in `install.sh:install_nix_packages`. Look up exact Nix attribute names at https://search.nixos.org/packages before adding. Platform-specific packages (e.g., wl-clipboard, xclip) go in the Linux-only section.
 - `~/.bashrc.local` is sourced last for machine-specific overrides not tracked in this repo.
+
+## Git workflow
+
+This repo is distributed from a personal GitHub account and is **PUBLIC**. Treat
+anything on `master` as world-readable.
+
+### Remotes and branches
+- `origin` — personal repo (SSH, pushable). Default destination for everything generic.
+- `master` — the public baseline. All generic, machine-agnostic config lives here,
+  pushed to `origin/master`.
+- Work machines also have a `job` remote and check out a `job` branch that layers
+  machine-/work-specific commits on top of `master`. `job` is always kept rebased on
+  `origin/master` — master is the baseline, never the reverse.
+
+### The rule that matters: never leak
+Never commit work-/employer-specific content to `master` or push it to `origin`:
+internal hostnames (beyond public ones already here), internal URLs, credentials,
+proprietary tooling, work-only paths. When unsure whether a change is generic or
+work-specific, **STOP and ASK** — never guess toward `master`.
+
+### Before any change
+1. `git fetch origin`; rebase the current branch onto `origin/master` if behind.
+2. If a `job` remote exists: `git fetch job`; rebase `job` if behind.
+
+### Where a change goes (classify and switch branch BEFORE editing)
+- Generic / machine-agnostic → on `master`, commit, push `origin master`.
+- Work-/machine-specific → on `job`, commit, push to the `job` remote. Never `origin`.
+- After a generic commit lands on `master` (work machine): rebase `job` onto the new
+  `master`, then `git push --force-with-lease job job`.
+
+### Push policy
+**Always commit AND push as part of finishing a change — on every machine (personal
+and work) and on every branch.** A commit on `master` is pushed to `origin/master`;
+a commit on `job` is pushed to the `job` remote. Skip the push only when explicitly
+told to. (This overrides the usual "commit/push only when asked" and "branch before
+committing to the default branch" defaults — here, generic commits go straight to
+`master`.)
+
+### Commit messages
+`[scope] Imperative summary` (e.g. `[nvim] …`, `[install/gnome] …`, `[bin/ssh-host-setup] …`).
+Keep the `Co-Authored-By:` trailer.
+
+### Work-machine overlay
+Work-specific instructions, when they exist, live only on the `job` branch (e.g. an
+`AGENTS.work.md` imported from the job branch's `CLAUDE.md`). They never exist on
+`master`. There is no overlay file yet — add one only when there's actual work-specific
+content to record.
+
+## Bootstrapping a work machine
+
+Clone the public repo (this becomes `origin`), add the enterprise remote as `job`,
+and check out the `job` branch:
+
+```bash
+git clone git@github.com:AlexanderSidorenko/sidorenko_dotfiles.git ~/.sidorenko_dotfiles
+cd ~/.sidorenko_dotfiles
+git remote add job <enterprise-ssh-url>
+git fetch job
+git checkout -b job --track job/job   # first machine ever: `git checkout -b job master`, then `git push -u job job`
+./install.sh
+```
