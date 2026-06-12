@@ -684,6 +684,41 @@ apply_gnome_tweaks() {
 
   # Disable window/workspace animations.
   gsettings_set org.gnome.desktop.interface enable-animations false
+
+  # --- Appearance: dark mode + battery percentage ---
+  gsettings_set org.gnome.desktop.interface color-scheme "'prefer-dark'"
+  gsettings_set org.gnome.desktop.interface show-battery-percentage true
+
+  # --- Power: never blank or auto-suspend (developer workstation) ---
+  gsettings_set org.gnome.desktop.session idle-delay 0
+  gsettings_set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type "'nothing'"
+  gsettings_set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-timeout 3600
+  gsettings_set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-timeout 7200
+  gsettings_set org.gnome.settings-daemon.plugins.power ambient-enabled false
+
+  # --- Notifications: no popup banners, hidden on lock screen ---
+  gsettings_set org.gnome.desktop.notifications show-banners false
+  gsettings_set org.gnome.desktop.notifications show-in-lock-screen false
+
+  # --- Touchpad: traditional (non-natural) scroll, two-finger right-click ---
+  gsettings_set org.gnome.desktop.peripherals.touchpad natural-scroll false
+  gsettings_set org.gnome.desktop.peripherals.touchpad click-method "'fingers'"
+
+  # --- Display: enable fractional scaling (HiDPI) ---
+  gsettings_set org.gnome.mutter experimental-features "['scale-monitor-framebuffer']"
+
+  # --- Dock: per-workspace app indicators ---
+  gsettings_set org.gnome.shell.extensions.dash-to-dock isolate-workspaces true
+
+  # --- Tiling Assistant: orange active-window hint (no-op if extension absent) ---
+  gsettings_set org.gnome.shell.extensions.tiling-assistant active-window-hint-color "'rgb(211,70,21)'"
+
+  # --- Nautilus / file chooser: list view, show hidden files ---
+  gsettings_set org.gnome.nautilus.preferences default-folder-viewer "'list-view'"
+  gsettings_set org.gtk.gtk4.Settings.FileChooser show-hidden true
+
+  # --- Keyboard: NumLock off at login ---
+  gsettings_set org.gnome.desktop.peripherals.keyboard numlock-state false
 }
 
 maybe_configure_gnome() {
