@@ -770,6 +770,73 @@ install_nvim_plugins() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Non-Nix GUI apps. Everything that can come from Nix does (see nix-packages.sh);
+# these stay on apt/PPA because their OpenGL/Electron stacks don't work well
+# under Nix on Ubuntu. Each installer is idempotent and a no-op if present.
+# ---------------------------------------------------------------------------
+
+# Pinned Obsidian version (bump to upgrade).
+OBSIDIAN_VERSION="1.12.7"
+
+apt_pkg_installed() { dpkg -s "$1" >/dev/null 2>&1; }
+
+require_apt() {
+  if ! command -v apt-get &>/dev/null; then
+    warn "apt-get not found; skipping $1."
+    return 1
+  fi
+}
+
+# Alacritty: not in Nix on Ubuntu (OpenGL stack conflicts), so use the
+# upstream maintainer's PPA. install_alacritty() above only manages the config.
+install_alacritty_pkg() {
+  require_apt "Alacritty" || return 0
+  if apt_pkg_installed alacritty; then
+    log "Alacritty already installed."
+    return 0
+  fi
+  log "Adding Alacritty PPA (ppa:aslatter/ppa) and installing..."
+  if ! command -v add-apt-repository &>/dev/null; then
+    sudo apt-get update && sudo apt-get install -y software-properties-common
+  fi
+  sudo add-apt-repository -y ppa:aslatter/ppa
+  sudo apt-get update
+  sudo apt-get install -y alacritty
+}
+
+install_obsidian() {
+  require_apt "Obsidian" || return 0
+  if apt_pkg_installed obsidian; then
+    log "Obsidian already installed."
+    return 0
+  fi
+  local url="https://github.com/obsidianmd/obsidian-releases/releases/download/v${OBSIDIAN_VERSION}/obsidian_${OBSIDIAN_VERSION}_amd64.deb"
+  local deb
+  deb="$(mktemp --suffix=.deb)"
+  log "Downloading Obsidian ${OBSIDIAN_VERSION}..."
+  if curl -fsSL "$url" -o "$deb"; then
+    sudo apt-get install -y "$deb"
+  else
+    warn "Could not download Obsidian from $url"
+  fi
+  rm -f "$deb"
+}
+
+maybe_install_extra_packages() {
+  local prompt="${C_GREEN}[sidorenko_dotfiles] Install non-Nix GUI apps (Alacritty, Obsidian)? [y/N] ${C_RESET}"
+  if ! confirm_yes_no "$prompt" N; then
+    log "Skipped non-Nix package installation."
+    return 0
+  fi
+  if has_gui; then
+    install_alacritty_pkg
+    install_obsidian
+  else
+    log "Skipping GUI apps (headless)."
+  fi
+}
+
 # Function to install Nix packages
 install_nix_packages() {
   log "Installing Nix packages..."
@@ -784,7 +851,7 @@ install_nix_packages() {
 
   if ! command -v nix-env &>/dev/null; then
     warn "nix-env command not found. Skipping Nix package installation."
-    return 1
+    return 0
   fi
 
   nix_install
@@ -820,14 +887,22 @@ main() {
     log "Skipping GNOME tweaks (headless)"
   fi
   symlink_prompt "${DOTDIR}/nvim" "${HOME}/.config/nvim"
-  install_nvim_plugins
 
+  # Nix supplies the nvim binary (and most other CLI tools), so install Nix
+  # packages BEFORE restoring nvim plugins, which shells out to nvim. On a
+  # fresh machine the old order skipped the restore because nvim wasn't there
+  # yet.
   local prompt="${C_GREEN}[sidorenko_dotfiles] Install Nix packages? (This might take a while) [y/N] ${C_RESET}"
   if confirm_yes_no "$prompt" N; then
     install_nix_packages
   else
     log "Skipped Nix package installation."
   fi
+
+  install_nvim_plugins
+
+  # Non-Nix GUI apps last; they don't depend on anything above.
+  maybe_install_extra_packages
 
   log "sidorenko_dotfiles successfully installed!"
 }
