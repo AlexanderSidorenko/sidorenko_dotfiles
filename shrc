@@ -50,7 +50,6 @@ path_prepend "$HOME/.local/bin"
 path_prepend "$HOME/bin"
 path_prepend "$HOME/.cargo/bin"
 path_prepend "$HOME/go/bin"
-path_prepend "$HOME/.npm-global/bin"
 path_prepend "$HOME/.asdf/bin"
 path_prepend "$HOME/.asdf/shims"
 

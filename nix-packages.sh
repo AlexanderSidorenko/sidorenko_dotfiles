@@ -7,7 +7,11 @@ NIX_PACKAGES=(
   bat
   caligula
   cargo
+  cargo-deny
+  cargo-shear
+  clippy
   cmark-gfm
+  codex
   cyme
   coreutils
   cscope
@@ -35,6 +39,10 @@ NIX_PACKAGES=(
   qrencode
   ranger
   ripgrep
+  rust-analyzer
+  rust-cbindgen
+  rustc
+  rustfmt
   sshpass
   tig
   tldr
