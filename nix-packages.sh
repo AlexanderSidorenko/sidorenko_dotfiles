@@ -15,6 +15,7 @@ NIX_PACKAGES=(
   cyme
   coreutils
   cscope
+  curl
   delta
   direnv
   duf
@@ -24,6 +25,8 @@ NIX_PACKAGES=(
   fish
   fzf
   git
+  gnumake # provides `make`
+  htop
   jq
   lazygit
   lstr
@@ -35,6 +38,7 @@ NIX_PACKAGES=(
   ncdu
   neovim
   nix
+  nodejs # provides node, npm, npx
   pv
   qrencode
   ranger
@@ -51,6 +55,8 @@ NIX_PACKAGES=(
   tree
   tree-sitter
   universal-ctags
+  unzip
+  vim
   wget
   zoxide
   zsh-autosuggestions
