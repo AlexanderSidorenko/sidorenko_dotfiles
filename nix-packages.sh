@@ -80,8 +80,13 @@ nix_install() {
     nix_args+=("nixpkgs.$pkg")
   done
 
+  # Quiet on success; only surface nix-env's output if the install fails.
   echo "Installing ${#NIX_PACKAGES[@]} packages..."
-  nix-env -iA "${nix_args[@]}"
+  local output
+  if ! output="$(nix-env -iA "${nix_args[@]}" 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    return 1
+  fi
 }
 
 # Wipe every nix-env package, then reinstall from NIX_PACKAGES.

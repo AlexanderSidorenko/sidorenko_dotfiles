@@ -814,10 +814,12 @@ install_nvim_plugins() {
   fi
 
   log "Restoring nvim plugins to lockfile versions (may take a while on first run)..."
-  if nvim --headless "+Lazy! restore" +qa; then
+  local output
+  if output="$(nvim --headless "+Lazy! restore" +qa 2>&1)"; then
     log "nvim plugin restore complete."
   else
     warn "nvim plugin restore failed; you can run :Lazy restore manually."
+    printf '%s\n' "$output" >&2
   fi
 }
 
@@ -895,18 +897,18 @@ install_nix_packages() {
   # shellcheck source=nix-packages.sh
   source "${DOTDIR}/nix-packages.sh"
 
-  log "The following packages will be installed:"
-  for pkg in "${NIX_PACKAGES[@]}"; do
-    log "  - $(name "$pkg")"
-  done
+  log "The following packages will be installed: $(name "${NIX_PACKAGES[*]}")"
 
   if ! command -v nix-env &>/dev/null; then
     warn "nix-env command not found. Skipping Nix package installation."
     return 0
   fi
 
-  nix_install
-  log "Nix package installation complete."
+  if nix_install; then
+    log "Nix package installation complete."
+  else
+    warn "Nix package installation failed (see output above)."
+  fi
 }
 
 main() {
