@@ -327,6 +327,37 @@ EOF
   fi
 }
 
+install_git_hooks() {
+  # Install this repo's own git hooks. commit-msg enforces the [job] commit
+  # prefix convention from AGENTS.md. Hooks live under githooks/ and are
+  # symlinked into the repo's real hooks dir, so edits to the tracked files
+  # take effect immediately.
+  local hooks_src="${DOTDIR}/githooks"
+
+  if [[ ! -d "$hooks_src" ]]; then
+    warn "Missing githooks dir; skipping git hook install."
+    return 0
+  fi
+
+  local git_dir
+  git_dir="$(git -C "$DOTDIR" rev-parse --absolute-git-dir 2>/dev/null || true)"
+  if [[ -z "$git_dir" ]]; then
+    log "Skipping git hook install ($(name "$DOTDIR") is not a git checkout)."
+    return 0
+  fi
+
+  local hooks_dest="${git_dir}/hooks"
+  mkdir -p "$hooks_dest"
+
+  local src dest filename
+  for src in "${hooks_src}"/*; do
+    [[ -e "$src" ]] || continue
+    filename="$(basename "$src")"
+    dest="${hooks_dest}/${filename}"
+    symlink_prompt "$src" "$dest"
+  done
+}
+
 install_ranger() {
   local ranger_src="${DOTDIR}/ranger"
   local ranger_dest="${HOME}/.config/ranger"
@@ -886,6 +917,7 @@ main() {
   ensure_zprofile_sources_zshrc
   maybe_switch_default_shell_to_zsh
   install_gitconfig
+  install_git_hooks
   if has_gui; then
     install_font_droidsans_nerd
   else

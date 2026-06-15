@@ -18,6 +18,7 @@ nvim/               — Neovim config (LazyVim-based, Lua)
 ranger/             — ranger file manager config
 claude/             — Claude Code config (settings.json; symlinked into ~/.claude)
 bin/                — custom scripts (clip, ssh-host-setup.sh, neovide)
+githooks/           — this repo's own git hooks (commit-msg enforces [job] prefix)
 ```
 
 ## Key conventions
@@ -104,6 +105,15 @@ committing to the default branch" defaults — here, generic commits go straight
 ### Commit messages
 `[scope] Imperative summary` (e.g. `[nvim] …`, `[install/gnome] …`, `[bin/ssh-host-setup] …`).
 Keep the `Co-Authored-By:` trailer.
+
+Commits that live only on the `job` branch (work-/machine-specific) prefix the
+title with a `[job]` tag, with no space before the scope:
+`[job][install] Install Slack on work machines`. This makes work-only history
+obvious at a glance and guards against it drifting onto `master`.
+
+This is enforced by the `githooks/commit-msg` hook (installed by `install.sh`):
+on `job` it rejects titles that don't start with `[job]`, and on `master` it
+rejects titles that do. Bypass for a one-off with `git commit --no-verify`.
 
 ### Work-machine overlay
 Work-specific instructions, when they exist, live only on the `job` branch (e.g. an

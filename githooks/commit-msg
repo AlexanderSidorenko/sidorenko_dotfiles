@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+#
+# commit-msg — enforce the dual-remote commit convention documented in AGENTS.md.
+#
+#   * On the `job` branch (work-/machine-specific history), the commit title
+#     MUST start with a `[job]` tag, e.g.
+#         [job][install] Install Slack on work machines
+#   * On `master` (the public baseline), the title MUST NOT start with `[job]`,
+#     guarding against work-only commits leaking onto the public branch.
+#
+# Installed by install.sh as <repo>/.git/hooks/commit-msg (a symlink, so edits
+# here take effect immediately). Bypass for a one-off with `git commit --no-verify`.
+set -euo pipefail
+
+msg_file="$1"
+
+# Don't police messages git itself is replaying or combining (merge, cherry-pick,
+# revert, rebase, autosquash): those reuse existing titles and get fixed up by
+# hand afterward. Only direct `git commit` authoring is checked.
+git_dir="$(git rev-parse --git-dir 2>/dev/null || echo .git)"
+for marker in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD; do
+  [[ -e "${git_dir}/${marker}" ]] && exit 0
+done
+[[ -d "${git_dir}/rebase-merge" || -d "${git_dir}/rebase-apply" ]] && exit 0
+
+# Commit title = first non-comment, non-blank line of the message.
+title="$(grep -vE '^[[:space:]]*#' "$msg_file" | grep -m1 -vE '^[[:space:]]*$' || true)"
+[[ -z "$title" ]] && exit 0 # Empty message; git aborts the commit on its own.
+
+# Let autosquash/merge/revert titles through untouched.
+case "$title" in
+Merge\ * | Revert\ * | fixup!\ * | squash!\ * | amend!\ *) exit 0 ;;
+esac
+
+# `git branch --show-current` returns the bare branch name (empty when
+# detached). Unlike `rev-parse --abbrev-ref HEAD`, it doesn't prepend `heads/`
+# when a remote shares the branch's name — which the `job` remote does here.
+branch="$(git branch --show-current 2>/dev/null || echo '')"
+
+case "$branch" in
+job)
+  if [[ "$title" != "[job]"* ]]; then
+    echo "commit-msg: commits on 'job' must start with [job] (e.g. '[job][install] …')." >&2
+    echo "  got: ${title}" >&2
+    echo "  bypass once with: git commit --no-verify" >&2
+    exit 1
+  fi
+  ;;
+master)
+  if [[ "$title" == "[job]"* ]]; then
+    echo "commit-msg: '[job]' commits must not land on 'master' (public baseline)." >&2
+    echo "  Switch to the 'job' branch for work-/machine-specific changes." >&2
+    echo "  got: ${title}" >&2
+    exit 1
+  fi
+  ;;
+esac
+
+exit 0
