@@ -72,3 +72,11 @@ action = "DecreaseFontSize"
 key = "Key0"
 mods = "Control"
 action = "ResetFontSize"
+
+# Make Shift+Enter insert a newline in TUIs that read ESC+CR as a newline
+# (e.g. Claude Code), instead of the Alt+Enter contortion. It sends exactly
+# what Alt+Enter already emits: ESC followed by CR.
+[[keyboard.bindings]]
+key = "Return"
+mods = "Shift"
+chars = "\u001b\r"
