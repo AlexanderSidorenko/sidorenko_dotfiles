@@ -307,11 +307,7 @@ EOF
   if [[ -e "$repo_gitconfig_personal" ]]; then
     if grep -qE '^[[:space:]]*path = ~/.sidorenko_dotfiles/gitconfig.personal$' "$user_gitconfig"; then
       log "$(name "$user_gitconfig") already includes sidorenko_dotfiles gitconfig.personal"
-      return 0
-    fi
-
-    local prompt="${C_GREEN}[sidorenko_dotfiles] Install optional gitconfig.personal include? [y/N] ${C_RESET}"
-    if confirm_yes_no "$prompt" N; then
+    else
       log "Appending personal include block to $(name "$user_gitconfig")"
       cat >>"$user_gitconfig" <<EOF
 
@@ -321,9 +317,19 @@ EOF
   path = ~/.sidorenko_dotfiles/gitconfig.personal
 # <<< sidorenko_dotfiles.personal <<<
 EOF
-    else
-      log "Skipped gitconfig.personal include"
     fi
+  fi
+
+  # Always pin THIS repo to personal at the repo-local level, so it stays
+  # personal even where the global identity is something else (e.g. the work
+  # identity the job branch installs). Local config beats global.
+  local pname pemail
+  pname="$(git config -f "$repo_gitconfig_personal" user.name 2>/dev/null || true)"
+  pemail="$(git config -f "$repo_gitconfig_personal" user.email 2>/dev/null || true)"
+  if [[ -n "$pemail" ]]; then
+    git -C "$DOTDIR" config --local user.name "$pname"
+    git -C "$DOTDIR" config --local user.email "$pemail"
+    log "Pinned $(name "$DOTDIR") commits to personal identity ($(name "$pemail"))"
   fi
 }
 
