@@ -24,6 +24,7 @@ NIX_PACKAGES=(
   fd
   fish
   fzf
+  gh # GitHub CLI
   git
   gnumake # provides `make`
   htop
