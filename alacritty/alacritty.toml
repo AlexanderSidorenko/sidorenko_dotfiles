@@ -46,6 +46,25 @@ save_to_clipboard = true
 [mouse]
 hide_when_typing = false
 
+# Open links (OSC 8 escape-sequence hyperlinks and plain-text URLs). This is
+# Alacritty's STOCK default hint restated verbatim -- defining hints.enabled
+# replaces the built-in array, so everything must be re-declared -- with exactly
+# ONE behavioral change: mouse.mods = "Shift" (stock expects an unmodified
+# hover). Inside tmux that matters: tmux captures the mouse, Alacritty's
+# capture-bypass is holding Shift, and a hint only highlights when the held
+# modifiers match its mods. Stock therefore can never highlight under tmux;
+# with Shift it lines up -> Shift+Click opens the link. Tradeoff: Shift+Click
+# is required even outside tmux (one uniform gesture). Ctrl+Shift+O is the
+# keyboard route (also stock). command gets the URL as its last argument.
+[[hints.enabled]]
+regex = "(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file:|git://|ssh:|ftp://)[^\u0000-\u001F\u007F-\u009F<>\"\\s{-}\\^⟨⟩`\\\\]+"
+hyperlinks = true
+post_processing = true
+persist = false
+command = "xdg-open"
+mouse = { enabled = true, mods = "Shift" }
+binding = { key = "O", mods = "Control|Shift" }
+
 [bell]
 duration = 0
 
