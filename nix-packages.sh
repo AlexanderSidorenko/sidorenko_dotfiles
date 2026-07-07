@@ -65,6 +65,13 @@ NIX_PACKAGES=(
   zstd
 )
 
+# Linux-only packages (no darwin support in nixpkgs).
+if [[ "$(uname)" == "Linux" ]]; then
+  NIX_PACKAGES+=(
+    sshfs # FUSE-based; nixpkgs marks it Linux-only
+  )
+fi
+
 # Linux GUI-only packages (Wayland/X11 clipboard tools).
 # has_gui is defined by install.sh; in interactive shells we just skip the gate.
 if [[ "$(uname)" == "Linux" ]] && declare -f has_gui >/dev/null 2>&1 && has_gui; then
