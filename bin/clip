@@ -9,6 +9,16 @@ fi
 
 [[ -n "$input" ]] || exit 0
 
+# Inside tmux, hand the text to the server: with set-clipboard on, -w makes
+# tmux emit OSC 52 on the attached client's tty. Unlike printing the escape
+# to our own stdout, this also works when stdout is not the terminal
+# (pipelines, scripts, coding agents).
+if [[ -n "${TMUX-}" ]] && command -v tmux >/dev/null 2>&1; then
+  if printf '%s' "$input" | tmux load-buffer -w - 2>/dev/null; then
+    exit 0
+  fi
+fi
+
 is_ssh=false
 if [[ -n "${SSH_CONNECTION-}" || -n "${SSH_TTY-}" ]]; then
   is_ssh=true
