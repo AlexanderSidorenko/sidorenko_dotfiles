@@ -438,6 +438,21 @@ install_claude() {
     dest="${claude_dest}/${filename}"
     symlink_prompt "$src" "$dest"
   done
+
+  # Machine-local Claude memory: claude/CLAUDE.md ends with an import of
+  # ~/.claude/CLAUDE.machine.md, which is deliberately untracked (per-machine
+  # content only). A missing import is silently skipped, so the stub is a
+  # discoverability nicety, not a requirement.
+  local machine_md="${claude_dest}/CLAUDE.machine.md"
+  if [[ ! -e "$machine_md" ]]; then
+    cat >"$machine_md" <<'EOF'
+# Machine-local Claude Code instructions
+
+Untracked on purpose: content here applies to every project on THIS machine
+only. Imported by ~/.claude/CLAUDE.md (tracked in sidorenko_dotfiles).
+EOF
+    log "Created machine-local Claude memory stub: $(name "$machine_md")"
+  fi
 }
 
 install_ssh_config() {

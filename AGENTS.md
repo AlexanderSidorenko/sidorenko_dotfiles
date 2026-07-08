@@ -16,7 +16,7 @@ mc.keymap           — Midnight Commander keymap
 alacritty/          — Alacritty terminal config (TOML; alacritty itself installed manually)
 nvim/               — Neovim config (LazyVim-based, Lua)
 ranger/             — ranger file manager config
-claude/             — Claude Code config (settings.json; symlinked into ~/.claude)
+claude/             — Claude Code config (settings.json, CLAUDE.md; symlinked into ~/.claude)
 bin/                — custom scripts (clip, ssh-host-setup.sh, neovide)
 githooks/           — this repo's own git hooks (commit-msg enforces [job] prefix)
 ```
@@ -64,6 +64,12 @@ bash -n bin/ssh-host-setup.sh && shellcheck bin/ssh-host-setup.sh
 - Tool integrations (fzf, zoxide, etc.) are guarded with `command -v` checks; keep this consistent for new additions.
 - New tools that should be installed by default go in `install.sh:install_nix_packages`. Look up exact Nix attribute names at https://search.nixos.org/packages before adding. Platform-specific packages (e.g., wl-clipboard, xclip) go in the Linux-only section.
 - `~/.bashrc.local` is sourced last for machine-specific overrides not tracked in this repo.
+- Claude Code instructions are tiered: `claude/CLAUDE.md` (tracked, symlinked to
+  `~/.claude/CLAUDE.md`) holds global-all-machines content and ends by importing
+  `~/.claude/CLAUDE.machine.md` (untracked, per-machine; missing import is
+  silently skipped — install.sh creates a stub). Work-machine-class content goes
+  on the `job` branch. Per-repo instructions live in each repo's own
+  CLAUDE.md/AGENTS.md as usual.
 
 ## Git workflow
 
