@@ -16,7 +16,7 @@ mc.keymap           — Midnight Commander keymap
 alacritty/          — Alacritty terminal config (TOML; alacritty itself installed manually)
 nvim/               — Neovim config (LazyVim-based, Lua)
 ranger/             — ranger file manager config
-claude/             — Claude Code config (settings.json, CLAUDE.md; symlinked into ~/.claude)
+claude/             — Claude Code config (settings.json, CLAUDE.md, skills/; symlinked into ~/.claude)
 bin/                — custom scripts (clip, ssh-host-setup.sh, neovide)
 githooks/           — this repo's own git hooks (commit-msg enforces [job] prefix)
 ```
@@ -70,6 +70,10 @@ bash -n bin/ssh-host-setup.sh && shellcheck bin/ssh-host-setup.sh
   silently skipped — install.sh creates a stub). Work-machine-class content goes
   on the `job` branch. Per-repo instructions live in each repo's own
   CLAUDE.md/AGENTS.md as usual.
+- Reusable procedures live in `claude/skills/<name>/SKILL.md` (Agent Skills
+  format, https://agentskills.io — portable across agents). Keep frontmatter
+  spec-minimal (`name` + `description`); avoid Claude-Code-only fields unless a
+  skill really needs them. Work-only skills go on the `job` branch.
 
 ## Git workflow
 
