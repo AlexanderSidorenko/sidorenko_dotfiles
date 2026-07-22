@@ -107,11 +107,11 @@ work-specific, **STOP and ASK** — never guess toward `master`.
   new `master`; push (`--force-with-lease`, to the `job` remote) only on request.
 
 ### Commit & push policy
-**Never commit, and NEVER push, unless explicitly asked in the current request.**
-The default deliverable is edited, validated files in the working tree — stop
-there and report what changed. When the user does ask to commit/push, follow the
-destination rules above (`master` → `origin`, `job` → `job` remote), and even
-then never let work-specific content reach `origin`.
+Committing locally is a normal part of finishing a change. **Pushing is not:
+NEVER push unless the user explicitly confirms that specific push** — no
+standing permission, no "push at the end by default". When a push is
+confirmed, follow the destination rules above (`master` → `origin`, `job` →
+`job` remote), and even then never let work-specific content reach `origin`.
 
 ### Commit messages
 `[scope] Imperative summary` (e.g. `[nvim] …`, `[install/gnome] …`, `[bin/ssh-host-setup] …`).
