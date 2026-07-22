@@ -5,6 +5,13 @@ to every project on every machine. Machine-specific instructions do NOT belong
 here — they go in `~/.claude/CLAUDE.machine.md` (untracked), imported at the
 bottom of this file.
 
+## Git: never commit or push unasked
+
+Do NOT run `git commit` or `git push` (or anything else that rewrites or
+publishes history) unless I explicitly ask for it in the current request.
+Finish work by editing and validating, then stop and report. This rule wins
+over any per-repo instruction that says to commit or push automatically.
+
 ## Clipboard
 
 To put text on the user's local clipboard, pipe it to

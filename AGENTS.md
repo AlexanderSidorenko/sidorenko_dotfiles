@@ -99,18 +99,19 @@ work-specific, **STOP and ASK** — never guess toward `master`.
 2. If a `job` remote exists: `git fetch job`; rebase `job` if behind.
 
 ### Where a change goes (classify and switch branch BEFORE editing)
-- Generic / machine-agnostic → on `master`, commit, push `origin master`.
-- Work-/machine-specific → on `job`, commit, push to the `job` remote. Never `origin`.
-- After a generic commit lands on `master` (work machine): rebase `job` onto the new
-  `master`, then `git push --force-with-lease job job`.
+- Generic / machine-agnostic → `master`; when a push is requested, it goes to
+  `origin master`.
+- Work-/machine-specific → `job`; when a push is requested, it goes to the `job`
+  remote. Never `origin`.
+- After a generic commit lands on `master` (work machine): rebase `job` onto the
+  new `master`; push (`--force-with-lease`, to the `job` remote) only on request.
 
-### Push policy
-**Always commit AND push as part of finishing a change — on every machine (personal
-and work) and on every branch.** A commit on `master` is pushed to `origin/master`;
-a commit on `job` is pushed to the `job` remote. Skip the push only when explicitly
-told to. (This overrides the usual "commit/push only when asked" and "branch before
-committing to the default branch" defaults — here, generic commits go straight to
-`master`.)
+### Commit & push policy
+**Never commit, and NEVER push, unless explicitly asked in the current request.**
+The default deliverable is edited, validated files in the working tree — stop
+there and report what changed. When the user does ask to commit/push, follow the
+destination rules above (`master` → `origin`, `job` → `job` remote), and even
+then never let work-specific content reach `origin`.
 
 ### Commit messages
 `[scope] Imperative summary` (e.g. `[nvim] …`, `[install/gnome] …`, `[bin/ssh-host-setup] …`).
