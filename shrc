@@ -576,10 +576,21 @@ fzf-kill() {
 # The --server override is required because mosh-server comes from nix-env on
 # our hosts, and ~/.nix-profile/bin is not on PATH in the non-interactive
 # shell that mosh's SSH bootstrap runs in.
+# --ssh: nixpkgs patches mosh to call nix's own openssh, whose glibc cannot
+# load the system sss NSS module — on AD-joined hosts it dies with "No user
+# exists for uid". The system ssh has no such problem.
+# --experimental-remote-ip=remote: the default IP discovery injects a
+# ProxyCommand, which never runs when ssh reuses a ControlMaster socket
+# (our ssh_config keeps one alive for 10m) and fails with "Did not find
+# remote IP address". "remote" derives the IP from $SSH_CONNECTION on the
+# server instead, so connection sharing keeps working.
 # Usage: mta <host> [session]   (session defaults to "main")
 mta() {
   [[ -n "${1:-}" ]] || { echo "usage: mta <host> [session]" >&2; return 2; }
-  mosh --server='PATH="$PATH:$HOME/.nix-profile/bin" mosh-server' "$1" -- \
+  local ssh_bin=ssh
+  [[ -x /usr/bin/ssh ]] && ssh_bin=/usr/bin/ssh
+  mosh --ssh="$ssh_bin" --experimental-remote-ip=remote \
+    --server='PATH="$PATH:$HOME/.nix-profile/bin" mosh-server' "$1" -- \
     tmux new-session -A -s "${2:-main}"
 }
 
