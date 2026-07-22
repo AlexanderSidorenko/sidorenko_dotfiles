@@ -568,6 +568,30 @@ fzf-kill() {
   echo "$pids" | xargs kill
 }
 
+# Remote shell for flaky/high-latency links: mosh + tmux attach-or-create.
+# mosh survives drops/roaming and predictively echoes keystrokes locally, so
+# typing stays responsive on slow links; the remote tmux provides scrollback
+# (mosh itself has none). Needs UDP 60000-61000 open to the host — if the
+# network blocks that, use `eta` instead.
+# The --server override is required because mosh-server comes from nix-env on
+# our hosts, and ~/.nix-profile/bin is not on PATH in the non-interactive
+# shell that mosh's SSH bootstrap runs in.
+# Usage: mta <host> [session]   (session defaults to "main")
+mta() {
+  [[ -n "${1:-}" ]] || { echo "usage: mta <host> [session]" >&2; return 2; }
+  mosh --server='PATH="$PATH:$HOME/.nix-profile/bin" mosh-server' "$1" -- \
+    tmux new-session -A -s "${2:-main}"
+}
+
+# TCP fallback when mosh's UDP range is blocked: Eternal Terminal + tmux.
+# Survives disconnects like mosh but has no predictive echo, so latency is
+# still felt. Requires etserver listening on the host (TCP 2022).
+# Usage: eta <host> [session]   (session defaults to "main")
+eta() {
+  [[ -n "${1:-}" ]] || { echo "usage: eta <host> [session]" >&2; return 2; }
+  et "$1" -c "tmux new-session -A -s ${2:-main}"
+}
+
 # =============================================================================
 # GIT ALIASES
 # =============================================================================
