@@ -468,21 +468,48 @@ install_ssh_config() {
   chmod 600 "$user_ssh_config"
 
   local include_line="Include ~/.sidorenko_dotfiles/ssh_config"
+  local open_marker='# >>> sidorenko_dotfiles >>>'
+  local close_marker='# <<< sidorenko_dotfiles <<<'
+
+  # The included file holds `Host *` defaults. OpenSSH keeps the FIRST value
+  # it obtains for each option, so the Include must sit at the BOTTOM of the
+  # user config — any Host block below it could not override the defaults.
   if grep -qF "$include_line" "$user_ssh_config"; then
-    log "$(name "$user_ssh_config") already includes sidorenko_dotfiles ssh_config"
-    return 0
+    if ! grep -qF "$open_marker" "$user_ssh_config"; then
+      log "$(name "$user_ssh_config") includes sidorenko_dotfiles ssh_config (hand-managed; leaving as is)"
+      return 0
+    fi
+    if awk -v mclose="$close_marker" \
+      'seen && NF {bad = 1; exit} $0 == mclose {seen = 1} END {exit bad}' \
+      "$user_ssh_config"; then
+      log "$(name "$user_ssh_config") already includes sidorenko_dotfiles ssh_config"
+      return 0
+    fi
+    log "Moving Include block to the bottom of $(name "$user_ssh_config")"
+  else
+    log "Appending Include block to $(name "$user_ssh_config")"
   fi
 
-  log "Prepending Include block to $(name "$user_ssh_config")"
-  # Include must come BEFORE any Host blocks to allow per-host overrides
-  # in user's config (first match wins in OpenSSH).
+  # Everything except the marker block (and leading blank lines), then the
+  # block re-appended at the end. Trailing blank lines die in the "$(...)".
+  local body
+  body="$(awk -v mopen="$open_marker" -v mclose="$close_marker" '
+    $0 == mopen {inblock = 1; next}
+    $0 == mclose {inblock = 0; next}
+    inblock {next}
+    !started && !NF {next}
+    {started = 1; print}' "$user_ssh_config")"
+
   local tmp
   tmp="$(mktemp)"
   {
-    printf '# >>> sidorenko_dotfiles >>>\n'
+    if [[ -n "$body" ]]; then
+      printf '%s\n\n' "$body"
+    fi
+    printf '%s\n' "$open_marker"
+    printf '# "Host *" defaults — keep this block LAST so per-host blocks above win.\n'
     printf '%s\n' "$include_line"
-    printf '# <<< sidorenko_dotfiles <<<\n\n'
-    cat "$user_ssh_config"
+    printf '%s\n' "$close_marker"
   } >"$tmp"
   mv "$tmp" "$user_ssh_config"
   chmod 600 "$user_ssh_config"
