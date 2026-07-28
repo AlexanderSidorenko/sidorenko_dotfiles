@@ -26,6 +26,7 @@ NIX_PACKAGES=(
   fzf
   gh # GitHub CLI
   git
+  git-lfs # run `git lfs install` once per machine to wire the global filters
   gnumake # provides `make`
   htop
   jq

@@ -938,6 +938,55 @@ maybe_install_extra_packages() {
   fi
 }
 
+# Nix itself (multi-user daemon install). Nearly every CLI tool comes from Nix
+# (see nix-packages.sh), so on a fresh machine this is the prerequisite for
+# install_nix_packages below. The official installer is interactive and uses
+# sudo internally; a no-op when /nix already exists.
+maybe_install_nix() {
+  if [[ -d /nix ]] || command -v nix-env &>/dev/null; then
+    log "Nix already installed."
+    return 0
+  fi
+  local prompt="${C_GREEN}[sidorenko_dotfiles] Nix is not installed. Run the official multi-user installer now? (interactive, uses sudo) [y/N] ${C_RESET}"
+  if ! confirm_yes_no "$prompt" N; then
+    log "Skipped Nix installation."
+    return 0
+  fi
+  if curl --proto '=https' --tlsv1.2 -L https://nixos.org/nix/install | sh -s -- --daemon; then
+    # Make nix usable for the rest of THIS run (new shells get it via shrc).
+    if [[ -e /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]]; then
+      set +u
+      # shellcheck disable=SC1091
+      source /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+      set -u
+    fi
+    log "Nix installed."
+  else
+    warn "Nix installation failed (see output above)."
+  fi
+}
+
+# Claude Code binary. Native installer, no sudo: binary versions land in
+# ~/.local/share/claude with a ~/.local/bin/claude symlink. Config/skills are
+# handled separately by install_claude (symlinks into ~/.claude); credentials
+# are per-machine — run `claude` and /login after installing.
+maybe_install_claude_bin() {
+  if command -v claude &>/dev/null || [[ -x "${HOME}/.local/bin/claude" ]]; then
+    log "Claude Code already installed."
+    return 0
+  fi
+  local prompt="${C_GREEN}[sidorenko_dotfiles] Claude Code is not installed. Install it now? (native installer, no sudo) [Y/n] ${C_RESET}"
+  if ! confirm_yes_no "$prompt" Y; then
+    log "Skipped Claude Code installation."
+    return 0
+  fi
+  if curl -fsSL https://claude.ai/install.sh | bash; then
+    log "Claude Code installed. Authenticate with: $(name "claude") then /login"
+  else
+    warn "Claude Code installation failed (see output above)."
+  fi
+}
+
 # Function to install Nix packages
 install_nix_packages() {
   log "Installing Nix packages..."
@@ -978,6 +1027,7 @@ main() {
   install_alacritty
   install_tmux
   install_claude
+  maybe_install_claude_bin
   install_ssh_config
   if has_gui; then
     make_keyboard_snappy
@@ -995,6 +1045,7 @@ main() {
   # packages BEFORE restoring nvim plugins, which shells out to nvim. On a
   # fresh machine the old order skipped the restore because nvim wasn't there
   # yet.
+  maybe_install_nix
   local prompt="${C_GREEN}[sidorenko_dotfiles] Install Nix packages? (This might take a while) [y/N] ${C_RESET}"
   if confirm_yes_no "$prompt" N; then
     install_nix_packages
