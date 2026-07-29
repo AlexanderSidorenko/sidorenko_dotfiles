@@ -1,0 +1,78 @@
+# /etc/yubikey-auth/config — knobs for the YubiKey step-down auth stack.
+#
+# Installed from zenbook/yubikey/config.default by install-yubikey-auth.sh,
+# which never overwrites an existing copy. Sourced as shell by
+# yubikey-auth-window, enroll-yubikey.sh, and the installer.
+#
+# This is sourced by a shell running as root, so QUOTE every value that can
+# contain a space. `CUE_PROMPT=Touch your YubiKey` is not an assignment — it
+# sets CUE_PROMPT=Touch and then tries to run the command `your`.
+
+# How long a password stays "fresh". While the window is open, every wired PAM
+# service accepts a YubiKey touch instead of a password; when it closes, only a
+# password will do. Read live by yubikey-auth-window — no reinstall needed to
+# change it.
+WINDOW_SECONDS=43200            # 12h
+
+# WebAuthn relying-party identity baked into each credential at registration
+# time. Both are matched at authentication time, so changing either one
+# invalidates every enrolled key — re-run enroll-yubikey.sh if you do.
+#
+# Deliberately a fixed string rather than pam_u2f's default of pam://$(hostname),
+# so renaming the host does not silently lock out the YubiKey path.
+ORIGIN="pam://zenbook"
+APPID="pam://zenbook"
+
+# Enrolled credentials. Root-owned and outside $HOME on purpose: a user (or
+# anything running as that user) must not be able to enrol an extra key for
+# themselves and mint their own second factor.
+AUTHFILE="/etc/yubikey-auth/u2f_mappings"
+
+# Shown by pam_u2f while it waits for the touch. Must be quoted — it has spaces.
+CUE_PROMPT="Touch your YubiKey"
+
+# How many times to offer the sensor before giving up and asking for a
+# password. pam_u2f has no retry option, so the installer emits this many
+# copies of the module. One bad-angle read should not cost you a password.
+#
+# 3 matches the value the authenticator itself advertises
+# (`platform uv attempt(s): 3` in `fido2-token -I`).
+#
+# Do not raise this much: the Bio blocks fingerprint matching after 3
+# CONSECUTIVE failures and then demands the FIDO2 PIN to unblock. A successful
+# touch resets that counter, so in normal use it is never approached — but a
+# large value here turns one fumbled login into a blocked sensor.
+# Unblock with any PIN operation, e.g. `ykman fido fingerprints list`.
+#
+# Changing this re-renders /etc/pam.d/yubikey-auth — re-run the installer.
+U2F_ATTEMPTS=3
+
+# How long sudo's own credential cache stays valid, in MINUTES (sudo-rs takes
+# minutes, fractions allowed — 0.5 is fine, "30s" is not). Written to
+# /etc/sudoers.d/10-yubikey-auth when sudo is wired.
+#
+# This is a free pass, not a touch: inside the window sudo asks for nothing at
+# all, because it never reaches PAM. Outside it, the normal stack applies
+# (touch, or password if the 12h window has lapsed).
+#
+# 0 disables the cache, so every single sudo costs a touch. 5 matches the
+# convention on macOS with Touch ID, and stops a quick follow-up command from
+# demanding a second touch. sudo-rs keeps a separate record per terminal, so
+# the pass never leaks into another terminal.
+#
+# Changing this re-runs validation — re-run the installer with --enable sudo.
+SUDO_TIMESTAMP_TIMEOUT=5
+
+# Set to 1 to make pam_u2f log its FIDO conversation to U2F_DEBUG_FILE.
+# Prefer `sudo install-yubikey-auth.sh --debug on|off`, which edits this and
+# re-renders the PAM file in one step.
+#
+# "syslog" is the right destination, not a path: pam_u2f accepts the literal
+# values syslog / stderr / stdout as well as a filename. polkit runs its PAM
+# stack inside a systemd sandbox with ProtectSystem=strict, so a file under
+# /var/log is read-only there and debug output would vanish exactly when you
+# most need it. syslog lands in journald next to the yubikey-auth entries:
+#
+#     journalctl -t pam_u2f -f
+U2F_DEBUG=0
+U2F_DEBUG_FILE="syslog"

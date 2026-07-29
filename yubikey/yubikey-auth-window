@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+#
+# yubikey-auth-window — the password-freshness window behind the YubiKey
+# step-down auth stack. See zenbook/yubikey/README.md for the design.
+#
+# There is one window per user, shared by every PAM service wired to
+# /etc/pam.d/yubikey-auth. While a user's window is open those services
+# accept a YubiKey touch (fingerprint user-verification on the Bio) in place
+# of a password. When it is closed only a password will do — and a successful
+# password re-opens it.
+#
+# pam_exec(8) runs this as root with PAM_USER set:
+#
+#   check    exit 0 = window open, exit 1 = closed   (auth, before pam_u2f)
+#   stamp    (re)open the window                     (auth, after a password)
+#
+# By hand, as root (--user defaults to $SUDO_USER, then $USER):
+#
+#   yubikey-auth-window status [--user NAME]
+#   yubikey-auth-window clear  [--user NAME]
+#
+# State lives under /run, a tmpfs, so every window closes on reboot. That is
+# deliberate: a cold boot always costs one password, which means an attacker
+# who power-cycles a stolen laptop can never land in touch-only mode.
+#
+# A touch does NOT extend the window — the 12h is measured from the last
+# password, so exposure has a hard deadline rather than sliding forward
+# forever. Set WINDOW_SECONDS in /etc/yubikey-auth/config to retune.
+
+set -u
+
+readonly CONFIG=/etc/yubikey-auth/config
+readonly STATE_DIR=/run/yubikey-auth
+readonly LOG_TAG=yubikey-auth
+readonly DEFAULT_WINDOW_SECONDS=43200   # 12h
+
+WINDOW_SECONDS=$DEFAULT_WINDOW_SECONDS
+
+# shellcheck source=/dev/null
+[[ -r $CONFIG ]] && . "$CONFIG"
+
+# A non-numeric window would turn every comparison below into a bash syntax
+# error, which pam_exec would report as a failure — i.e. "window closed".
+# That is the safe direction, but be explicit about it rather than relying on
+# an error path.
+if [[ ! ${WINDOW_SECONDS:-} =~ ^[0-9]+$ ]]; then
+	logger -t "$LOG_TAG" -p authpriv.err -- \
+		"invalid WINDOW_SECONDS in $CONFIG; using $DEFAULT_WINDOW_SECONDS"
+	WINDOW_SECONDS=$DEFAULT_WINDOW_SECONDS
+fi
+
+log()  { logger -t "$LOG_TAG" -p authpriv.info -- "$*"; }
+err()  { logger -t "$LOG_TAG" -p authpriv.err -- "$*"; printf 'yubikey-auth: %s\n' "$*" >&2; }
+die()  { err "$*"; exit 2; }
+
+usage() {
+	cat >&2 <<-EOF
+		usage: ${0##*/} {check|stamp|clear|status} [--user NAME]
+
+		  check    exit 0 if the user's password window is open, 1 if closed
+		  stamp    (re)open the window — call only after a successful password
+		  clear    close the window now
+		  status   human-readable window state
+	EOF
+	exit 2
+}
+
+# ---------------------------------------------------------------- arguments
+
+verb=${1:-}
+[[ -n $verb ]] || usage
+shift
+
+user=""
+while (($#)); do
+	case $1 in
+	--user)   user=${2:-}; shift 2 || die "--user needs a value" ;;
+	--user=*) user=${1#--user=}; shift ;;
+	-h | --help) usage ;;
+	*) die "unknown argument: $1" ;;
+	esac
+done
+
+# pam_exec exports PAM_USER; interactive runs fall back to the invoking user.
+: "${user:=${PAM_USER:-${SUDO_USER:-${USER:-}}}}"
+[[ -n $user ]] || die "cannot determine which user to act on; pass --user"
+
+# The username becomes a path component, so it must not be able to escape
+# STATE_DIR. This rejects "..", anything with a slash, and anything exotic.
+[[ $user =~ ^[A-Za-z_][A-Za-z0-9_.-]*\$?$ ]] || die "refusing to act on suspicious username: $user"
+
+readonly user
+readonly stamp_file="$STATE_DIR/$user"
+
+# ------------------------------------------------------------------ helpers
+
+now() { date +%s; }
+
+# Reads the stamp into $REPLY. Returns 1 when there is no usable stamp, so a
+# missing, unreadable, corrupt, or future-dated file all mean "closed".
+read_stamp() {
+	local raw
+	[[ -f $stamp_file ]] || return 1
+	raw=$(cat -- "$stamp_file" 2>/dev/null) || return 1
+	[[ $raw =~ ^[0-9]+$ ]] || {
+		err "corrupt stamp for $user; treating the window as closed"
+		return 1
+	}
+	# A clock that jumped backwards must not hand out an unbounded window.
+	if ((raw > $(now))); then
+		err "stamp for $user is in the future; treating the window as closed"
+		return 1
+	fi
+	REPLY=$raw
+}
+
+require_root() {
+	((EUID == 0)) || die "must run as root to $verb"
+}
+
+fmt_duration() {
+	local s=$1
+	printf '%dh %dm %ds' $((s / 3600)) $((s % 3600 / 60)) $((s % 60))
+}
+
+# ------------------------------------------------------------------- verbs
+
+case $verb in
+check)
+	if ! read_stamp; then
+		log "check: $user: closed (no valid stamp) — password required"
+		exit 1
+	fi
+	age=$(($(now) - REPLY))
+	if ((age < WINDOW_SECONDS)); then
+		log "check: $user: open ($(fmt_duration $((WINDOW_SECONDS - age))) left) — YubiKey accepted"
+		exit 0
+	fi
+	log "check: $user: expired ($(fmt_duration $age) since password) — password required"
+	exit 1
+	;;
+
+stamp)
+	require_root
+	# tmpfiles.d creates STATE_DIR at boot; recreate it defensively in case
+	# this runs before that, or someone cleaned /run by hand.
+	if ! install -d -o root -g root -m 0700 "$STATE_DIR"; then
+		die "cannot create $STATE_DIR"
+	fi
+	tmp="$stamp_file.tmp.$$"
+	if ! (umask 077 && now >"$tmp") || ! mv -f -- "$tmp" "$stamp_file"; then
+		rm -f -- "$tmp"
+		die "cannot write $stamp_file"
+	fi
+	chmod 0600 -- "$stamp_file"
+	log "stamp: $user: window open for $(fmt_duration "$WINDOW_SECONDS")"
+	;;
+
+clear)
+	require_root
+	rm -f -- "$stamp_file" || die "cannot remove $stamp_file"
+	log "clear: $user: window closed"
+	;;
+
+status)
+	printf 'user:            %s\n' "$user"
+	printf 'window length:   %s\n' "$(fmt_duration "$WINDOW_SECONDS")"
+	printf 'state file:      %s\n' "$stamp_file"
+	if ((EUID != 0)) && [[ ! -r $STATE_DIR ]]; then
+		printf 'state:           unknown (%s is root-only; re-run with sudo)\n' "$STATE_DIR"
+		exit 0
+	fi
+	if ! read_stamp; then
+		printf 'state:           CLOSED — next auth needs a password\n'
+		exit 0
+	fi
+	age=$(($(now) - REPLY))
+	printf 'last password:   %s (%s ago)\n' "$(date -d "@$REPLY" '+%Y-%m-%d %H:%M:%S %Z')" "$(fmt_duration "$age")"
+	if ((age < WINDOW_SECONDS)); then
+		printf 'state:           OPEN — YubiKey touch accepted\n'
+		printf 'expires:         %s (in %s)\n' \
+			"$(date -d "@$((REPLY + WINDOW_SECONDS))" '+%Y-%m-%d %H:%M:%S %Z')" \
+			"$(fmt_duration $((WINDOW_SECONDS - age)))"
+	else
+		printf 'state:           EXPIRED — next auth needs a password\n'
+	fi
+	;;
+
+*)
+	usage
+	;;
+esac
