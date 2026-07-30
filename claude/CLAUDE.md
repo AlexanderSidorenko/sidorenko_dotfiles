@@ -24,6 +24,10 @@ When the user asks for "copyable" text (e.g. a drafted PR comment), write it
 to a file and run `clip` on the file — text rendered in the terminal picks up
 the CLI's left margin and is not cleanly copyable.
 
+The **clip skill** has the full procedure plus destination-aware formatting
+(slack, confluence, jira, plain) — use it whenever copying for a named
+destination.
+
 ## Machine-local instructions
 
 Imported if present on this machine (a missing import is silently skipped):
