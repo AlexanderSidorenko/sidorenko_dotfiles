@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# pre-commit — verify that every @ import in claude/CLAUDE.md resolves.
+#
+# Claude Code skips a missing @ import silently: the instructions it points at
+# simply stop applying, with no error anywhere. Renaming or moving a skill would
+# therefore break CLAUDE.md quietly. This hook turns that into a failed commit,
+# fired at the moment the drift is introduced.
+#
+# Targets are checked against the tracked files in this repo, not the live
+# ~/.claude, so the check behaves the same on a machine where install.sh has
+# never run.
+# Every ~ below is literal text quoted from a CLAUDE.md import line, never a
+# path this script expands itself.
+# shellcheck disable=SC2088
+set -euo pipefail
+
+readonly TARGET="claude/CLAUDE.md"
+
+# Imports that are optional by design: untracked, per-machine, and documented in
+# AGENTS.md as silently skipped when absent.
+readonly EXEMPT=(
+  "~/.claude/CLAUDE.machine.md"
+)
+
+repo_root="$(git rev-parse --show-toplevel)"
+
+# Nothing to do unless this commit touches the file.
+if ! git diff --cached --name-only | grep -qx "$TARGET"; then
+  exit 0
+fi
+
+missing=()
+
+# Read the staged content, not the working tree: that is what is being committed.
+# Only line-leading @ counts as an import, which is how CLAUDE.md writes them.
+while IFS= read -r import; do
+  skip=0
+  for exempt in "${EXEMPT[@]}"; do
+    if [[ "$import" == "$exempt" ]]; then
+      skip=1
+      break
+    fi
+  done
+  if ((skip)); then
+    continue
+  fi
+
+  # ~/.claude is a symlink to this repo's claude/, so resolve through the repo.
+  case "$import" in
+    "~/.claude/"*) resolved="${repo_root}/claude/${import#\~/.claude/}" ;;
+    "~/"*) resolved="${HOME}/${import#\~/}" ;;
+    /*) resolved="$import" ;;
+    *) resolved="${repo_root}/$(dirname "$TARGET")/${import}" ;;
+  esac
+
+  if [[ ! -e "$resolved" ]]; then
+    missing+=("${import} (looked for ${resolved})")
+  fi
+done < <(git show ":${TARGET}" | sed -n 's/^@\([^[:space:]]\{1,\}\).*/\1/p')
+
+if ((${#missing[@]})); then
+  {
+    echo "pre-commit: unresolvable @ import in ${TARGET}:"
+    printf '  %s\n' "${missing[@]}"
+    echo
+    echo "A missing import is skipped silently at runtime — the instructions it"
+    echo "points at would stop applying with no error. Fix the path, or remove"
+    echo "the import line if the content is gone for good."
+    echo
+    echo "Bypass for a one-off with: git commit --no-verify"
+  } >&2
+  exit 1
+fi
+
+exit 0

@@ -28,6 +28,17 @@ The **clip skill** has the full procedure plus destination-aware formatting
 (slack, confluence, jira, plain) — use it whenever copying for a named
 destination.
 
+## Caveman mode (on by default)
+
+On from the first message of every session, at level **ultra**. That level
+overrides the `Default: **full**` line in the ruleset below, which is vendored
+verbatim from upstream and never edited locally — local policy belongs in this
+section instead. Skip the wenyan levels: they translate replies into Classical
+Chinese. `/caveman <level>` changes level and "stop caveman" turns it off, both
+for the session only; deleting this section turns it off permanently.
+
+@~/.claude/skills/caveman/SKILL.md
+
 ## Machine-local instructions
 
 Imported if present on this machine (a missing import is silently skipped):

@@ -18,7 +18,8 @@ nvim/               — Neovim config (LazyVim-based, Lua)
 ranger/             — ranger file manager config
 claude/             — Claude Code config (settings.json, CLAUDE.md, skills/; symlinked into ~/.claude)
 bin/                — custom scripts (clip, ssh-host-setup.sh, neovide)
-githooks/           — this repo's own git hooks (commit-msg enforces [job] prefix)
+githooks/           — this repo's own git hooks (commit-msg enforces [job] prefix;
+                      pre-commit verifies @ imports in claude/CLAUDE.md resolve)
 ```
 
 ## Key conventions
@@ -74,6 +75,14 @@ bash -n bin/ssh-host-setup.sh && shellcheck bin/ssh-host-setup.sh
   format, https://agentskills.io — portable across agents). Keep frontmatter
   spec-minimal (`name` + `description`); avoid Claude-Code-only fields unless a
   skill really needs them. Work-only skills go on the `job` branch.
+- Third-party skills are vendored **verbatim** and never edited in place, so an
+  upstream update is a clean overwrite; anything local (defaults, opt-outs) goes
+  in `claude/CLAUDE.md` instead. `claude/skills/caveman/SKILL.md` comes from
+  https://github.com/JuliusBrussee/caveman (`skills/caveman/SKILL.md`, upstream
+  commit 710173f). Only that one file is vendored — upstream's Node installer,
+  CLI, and companion skills are deliberately not used; `claude/` is symlinked
+  into `~/.claude` by `install.sh` and the `@` import in `claude/CLAUDE.md` is
+  what turns the skill on.
 
 ## Git workflow
 
