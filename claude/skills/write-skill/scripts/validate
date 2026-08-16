@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Mechanical validation of an Agent Skill directory against the spec
+# (agentskills.io) and this repo's conventions. Usage: validate <skill-dir>
+set -euo pipefail
+
+if [[ "${1-}" == "--help" || "${1-}" == "-h" || $# -eq 0 ]]; then
+  cat <<'EOF'
+usage: validate <skill-dir>
+
+Mechanically checks an Agent Skill directory: frontmatter present and
+spec-conformant (name kebab-case <=64 chars and equal to the directory
+name; description 1-1024 chars, no angle brackets; spec-only keys),
+body under 500 lines, bundled scripts executable and non-interactive.
+Exit 0 with "RESULT: OK" or exit 1 with FAIL lines naming each problem.
+EOF
+  [[ $# -eq 0 ]] && exit 2
+  exit 0
+fi
+dir="$1"
+dir="${dir%/}"
+fail=0
+err() { printf 'FAIL: %s\n' "$*"; fail=1; }
+warn() { printf 'warn: %s\n' "$*"; }
+
+md="$dir/SKILL.md"
+[[ -f "$md" ]] || { err "no SKILL.md in $dir"; exit 1; }
+
+# Frontmatter block: first line must be ---, closed by a second ---.
+[[ "$(head -1 "$md")" == "---" ]] || err "SKILL.md must start with '---'"
+fm="$(awk 'NR==1 && $0=="---" {infm=1; next} infm && $0=="---" {exit} infm {print}' "$md")"
+[[ -n "$fm" ]] || err "empty or unterminated frontmatter"
+
+name="$(printf '%s\n' "$fm" | sed -n 's/^name:[[:space:]]*//p' | head -1)"
+desc="$(printf '%s\n' "$fm" | sed -n 's/^description:[[:space:]]*//p' | head -1)"
+
+# name: present, 1-64 chars, kebab, matches directory.
+[[ -n "$name" ]] || err "missing 'name' in frontmatter"
+((${#name} <= 64)) || err "name exceeds 64 chars (${#name})"
+[[ "$name" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || err "name must be lowercase kebab-case: '$name'"
+[[ "$name" == "$(basename "$dir")" ]] || err "name '$name' != directory '$(basename "$dir")'"
+
+# description: present, <=1024, no angle brackets; nudge toward terseness.
+[[ -n "$desc" ]] || err "missing 'description' in frontmatter"
+((${#desc} <= 1024)) || err "description exceeds 1024 chars (${#desc})"
+[[ "$desc" != *"<"* && "$desc" != *">"* ]] || err "description contains angle brackets"
+((${#desc} <= 500)) || warn "description is ${#desc} chars — the shared listing budget punishes length"
+
+# Only spec frontmatter keys (repo convention: ideally just name+description).
+while IFS= read -r key; do
+  case "$key" in
+  name | description | license | compatibility | metadata | allowed-tools) ;;
+  *) err "non-spec frontmatter key: '$key' (breaks claude.ai/API portability)" ;;
+  esac
+done < <(printf '%s\n' "$fm" | sed -n 's/^\([a-zA-Z][a-zA-Z-]*\):.*/\1/p')
+
+# Body length.
+body_lines="$(awk 'NR==1 && $0=="---" {infm=1; next} infm && $0=="---" {infm=0; body=1; next} body {n++} END {print n+0}' "$md")"
+((body_lines <= 500)) || warn "body is $body_lines lines (>500) — split into references/"
+
+# Bundled scripts must be executable and non-interactive-ish.
+if [[ -d "$dir/scripts" ]]; then
+  while IFS= read -r f; do
+    [[ -x "$f" ]] || err "not executable: $f"
+    if grep -qE '^[^#]*\bread -r?p?\b|^[^#]*\binput\(' "$f"; then
+      warn "$f may prompt interactively — agent shells hang on prompts"
+    fi
+  done < <(find "$dir/scripts" -type f)
+fi
+
+if ((fail)); then
+  echo "RESULT: FAIL"
+  exit 1
+fi
+echo "RESULT: OK ($name: description ${#desc} chars, body $body_lines lines)"
