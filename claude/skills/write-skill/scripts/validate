@@ -10,7 +10,8 @@ usage: validate <skill-dir>
 Mechanically checks an Agent Skill directory: frontmatter present and
 spec-conformant (name kebab-case <=64 chars and equal to the directory
 name; description 1-1024 chars, no angle brackets; spec-only keys),
-body under 500 lines, bundled scripts executable and non-interactive.
+body under 500 lines, bundled scripts (scripts/, bin/) executable and
+non-interactive.
 Exit 0 with "RESULT: OK" or exit 1 with FAIL lines naming each problem.
 EOF
   [[ $# -eq 0 ]] && exit 2
@@ -43,6 +44,7 @@ desc="$(printf '%s\n' "$fm" | sed -n 's/^description:[[:space:]]*//p' | head -1)
 [[ -n "$desc" ]] || err "missing 'description' in frontmatter"
 ((${#desc} <= 1024)) || err "description exceeds 1024 chars (${#desc})"
 [[ "$desc" != *"<"* && "$desc" != *">"* ]] || err "description contains angle brackets"
+[[ "$desc" != *"#"* ]] || err "description contains '#' (Claude Code's skill listing truncates at it)"
 ((${#desc} <= 500)) || warn "description is ${#desc} chars — the shared listing budget punishes length"
 
 # Only spec frontmatter keys (repo convention: ideally just name+description).
@@ -57,15 +59,18 @@ done < <(printf '%s\n' "$fm" | sed -n 's/^\([a-zA-Z][a-zA-Z-]*\):.*/\1/p')
 body_lines="$(awk 'NR==1 && $0=="---" {infm=1; next} infm && $0=="---" {infm=0; body=1; next} body {n++} END {print n+0}' "$md")"
 ((body_lines <= 500)) || warn "body is $body_lines lines (>500) — split into references/"
 
-# Bundled scripts must be executable and non-interactive-ish.
-if [[ -d "$dir/scripts" ]]; then
+# Bundled executables (scripts/ and bin/) must be executable and non-interactive-ish.
+for sub in scripts bin; do
+  [[ -d "$dir/$sub" ]] || continue
   while IFS= read -r f; do
     [[ -x "$f" ]] || err "not executable: $f"
-    if grep -qE '^[^#]*\bread -r?p?\b|^[^#]*\binput\(' "$f"; then
+    # while-read loops, reads fed by a redirect, and .read() method calls
+    # don't prompt; flag the rest.
+    if grep -E '^[^#]*(\bread\b|\binput\()' "$f" | grep -qvE '\bwhile\b|<|\.read *\('; then
       warn "$f may prompt interactively — agent shells hang on prompts"
     fi
-  done < <(find "$dir/scripts" -type f)
-fi
+  done < <(find "$dir/$sub" -type f)
+done
 
 if ((fail)); then
   echo "RESULT: FAIL"

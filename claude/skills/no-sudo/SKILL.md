@@ -1,6 +1,6 @@
 ---
 name: no-sudo
-description: How to handle anything needing root — the agent's shell has no sudo; the user does. Batch every privileged command into one explained handoff, and for state-changing root work prefer an idempotent, version-controlled script over one-off commands. Use whenever a task needs sudo/root — package installs, systemctl, /etc edits, udev/NetworkManager rules, mounts — or when a command fails with "permission denied" and sudo would be the reflex.
+description: How to handle anything needing root — the agent's shell has no sudo; the user does. Use whenever a task needs sudo/root — package installs, systemctl, /etc edits, udev/NetworkManager rules, mounts — or when a command fails with "permission denied" and sudo would be the reflex.
 ---
 
 # Sudo protocol
