@@ -62,7 +62,7 @@ RESET="$(printf '\033[0m')"
     printf '   master just moved. AGENTS.md: rebase job onto the new master before moving on.\n'
   fi
   printf '   claude/skills/job-branch-sync/bin/sync-dance   # or: git switch job && git rebase master\n'
-  printf '   Nothing is pushed without your explicit confirmation.\n'
+  printf '   Then push both halves: this repo pushes what it commits.\n'
 } >&2
 
 exit 0

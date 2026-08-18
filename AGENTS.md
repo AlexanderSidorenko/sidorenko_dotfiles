@@ -157,11 +157,24 @@ If `HEAD`'s reflog has no entry for a commit that a branch's reflog records, tha
 commit was made this way and its fold needs verifying by hand.
 
 ### Commit & push policy
-Committing locally is a normal part of finishing a change. **Pushing is not:
-NEVER push unless the user explicitly confirms that specific push** — no
-standing permission, no "push at the end by default". When a push is
-confirmed, follow the destination rules above (`master` → `origin`, `job` →
-`job` remote), and even then never let work-specific content reach `origin`.
+**Committing and pushing are one action here.** Anything committed is pushed to
+its remote in the same breath — `master` → `origin`, `job` → the `job` remote —
+without stopping to ask. Do not leave a commit sitting unpushed and do not ask
+whether to push; an unpushed commit is the failure mode, because it strands the
+change on one machine and leaves the next machine's sync reconciling a divergence
+that never needed to exist.
+
+This deliberately overrides the global default in `~/.claude/CLAUDE.md`, which
+requires per-push confirmation and grants the exception to repos that state their
+own policy. This is that statement.
+
+What does *not* relax, because it governs **what** is published rather than
+whether to publish:
+- Never let work-/machine-specific content reach `origin` — see "never leak"
+  above. Classify onto the right branch *before* committing, not after.
+- Force-push only with `--force-with-lease`, and pin the lease to the ref.
+- Push both halves after a `master` rewrite: `master`, then `job` rebased onto
+  it. Half a fold published is worse than none.
 
 ### Commit messages
 `[scope] Imperative summary` (e.g. `[nvim] …`, `[install/gnome] …`, `[bin/ssh-host-setup] …`).
