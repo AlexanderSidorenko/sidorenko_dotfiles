@@ -89,6 +89,33 @@ anything on `master` as world-readable.
   machine-/work-specific commits on top of `master`. `job` is always kept rebased on
   `origin/master` — master is the baseline, never the reverse.
 
+### Rewriting history is normal here
+Both branches are amended, squashed, reordered and force-pushed as a matter of
+course. This is a single-maintainer repo; a readable history is worth more than an
+append-only guarantee. `master` being the *baseline* is a statement about content
+(generic, world-readable) and about direction (`job` rebases onto `master`, never
+the reverse) — it is **not** a claim that published commits are immutable.
+
+- Amend, squash and reorder freely on `master` and on `job`, before or after
+  publishing. Do not treat a pushed commit as frozen, and do not ask whether
+  rewriting is allowed — it is.
+- Publish a rewrite with `--force-with-lease`, never a bare `--force`: the lease
+  is what catches a remote that someone else moved. Where a branch name collides
+  with a remote name — `job` does here — pin the lease explicitly:
+  `git push --force-with-lease=refs/heads/job:<sha> job refs/heads/job:refs/heads/job`
+- Rewriting `master` reparents `job`, so rebase `job` onto the new `master` and
+  force-push that too. Both halves, or the fold is silently broken.
+- Rewrite by checking the branch out and using `rebase`/`--amend`. The plumbing
+  prohibition below still applies: it governs how commits are *authored*, not
+  whether history may change.
+- Verify a content-preserving rewrite by comparing trees, not by eyeballing the
+  log: `git diff <backup-ref> <branch>` empty, or the two `^{tree}` hashes equal.
+  Tag the old tip first (`git branch backup/... <branch>`) so there is something
+  to compare against and fall back to.
+- Pushing still requires explicit per-push confirmation (see the push policy
+  below). "Rewriting is allowed" and "ask before publishing" are independent
+  rules; neither implies the other.
+
 ### The rule that matters: never leak
 Never commit work-/employer-specific content to `master` or push it to `origin`:
 internal hostnames (beyond public ones already here), internal URLs, credentials,
