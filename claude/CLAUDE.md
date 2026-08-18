@@ -13,6 +13,19 @@ Committing locally when a change is finished is fine. But do NOT `git push`
 that specific push — no standing permission, no pushing "to finish up". This
 rule wins over any per-repo instruction that says to push automatically.
 
+## Git: commit by checking out the branch, never with plumbing
+
+To put a commit on a branch, check that branch out and run `git commit`. Carry
+dirty state across the switch with an explicit `git stash push` /
+`git stash pop --index`.
+
+Never author a commit with plumbing (`git commit-tree`, `git hash-object` +
+`git update-ref`, `git branch -f`), and never from a path that leaves the working
+tree on a different branch than the one receiving the commit. Hooks do not run,
+so message and content guards silently stop applying; the committed content never
+lands in the working tree, so anything reading files rather than git sees no
+change at all; and a branch moves with nothing in `HEAD`'s reflog to show it.
+
 ## Clipboard
 
 To put text on the user's local clipboard, pipe it to

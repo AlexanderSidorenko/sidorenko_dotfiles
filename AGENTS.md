@@ -107,6 +107,28 @@ work-specific, **STOP and ASK** — never guess toward `master`.
 - After a generic commit lands on `master` (work machine): rebase `job` onto the
   new `master`; push (`--force-with-lease`, to the `job` remote) only on request.
 
+### How commits are made (never with plumbing)
+A commit is made by **checking out the target branch and running `git commit`** —
+`git switch master`, edit, commit, `git switch job`. Preserve dirty state around
+the switch with an explicit `git stash push` / `git stash pop --index`.
+
+Never write a commit with plumbing (`git commit-tree`, `git hash-object` +
+`git update-ref`, `git branch -f`) or from any path that leaves the working tree
+on a different branch than the one being committed to. It looks equivalent and is
+not:
+
+- **Hooks do not run.** `commit-msg` is bypassed entirely, so the `[job]`-prefix
+  guard silently stops applying in both directions.
+- **The change never reaches the working tree.** Content committed to `master`
+  from a `job` checkout exists only inside a git object. Nothing on disk changes,
+  so anything that reads files rather than git — `install.sh`, a systemd unit, a
+  script you then try to run — behaves as if the change was never made.
+- **The fold is skipped and looks done.** `master` moves while `job` stays
+  behind, with no dirty file and no reflog entry on `HEAD` to notice it by.
+
+If `HEAD`'s reflog has no entry for a commit that a branch's reflog records, that
+commit was made this way and its fold needs verifying by hand.
+
 ### Commit & push policy
 Committing locally is a normal part of finishing a change. **Pushing is not:
 NEVER push unless the user explicitly confirms that specific push** — no
