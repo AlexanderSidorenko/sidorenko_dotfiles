@@ -847,6 +847,147 @@ maybe_configure_gnome() {
   log "GNOME tweaks applied. Log out and back in for all changes to take effect."
 }
 
+# --- GNOME Shell extension: Astra Monitor (memory history plot in the top bar) ---
+#
+# https://extensions.gnome.org/extension/6682/astra-monitor/
+# Chosen over the alternatives because it is the only one that draws a real
+# history plot in the panel itself (rather than only in its dropdown), it is the
+# only one that surfaces zswap, and it needs no dependencies and no root.
+MEMORY_MONITOR_UUID="monitor@astraext.github.io"
+MEMORY_MONITOR_EGO_ID=6682
+
+# `gnome-extensions enable` cannot be used for a freshly installed extension. The
+# shell only discovers extensions by scanning datadirs once at startup and keeps
+# no directory monitor, so its D-Bus EnableExtension returns false for an unknown
+# UUID; the CLI then reports "does not exist" and persists nothing. Writing the
+# gsettings key directly works and takes effect at next login.
+enable_gnome_extension() {
+  local uuid="$1"
+  local cur
+
+  cur="$(gsettings get org.gnome.shell enabled-extensions 2>/dev/null || echo '@as []')"
+  case "$cur" in
+  *"'${uuid}'"*)
+    log "Extension already enabled: $(name "$uuid")"
+    ;;
+  "@as []" | "[]")
+    gsettings set org.gnome.shell enabled-extensions "['${uuid}']"
+    ;;
+  *)
+    gsettings set org.gnome.shell enabled-extensions "${cur%]}, '${uuid}']"
+    ;;
+  esac
+
+  # disabled-extensions takes precedence over enabled-extensions, and
+  # disable-user-extensions is a global kill switch; neither must veto us.
+  gsettings set org.gnome.shell disable-user-extensions false
+}
+
+# Panel config, memory only. Uses dconf rather than gsettings_set because an
+# extensions.gnome.org schema is not in the default schema lookup path; dconf
+# writes also work before the extension has ever been loaded.
+configure_memory_monitor() {
+  local d="/org/gnome/shell/extensions/astra-monitor"
+
+  if ! command -v dconf &>/dev/null; then
+    warn "dconf not found; leaving Astra Monitor at its defaults."
+    return 0
+  fi
+
+  # memory-header-graph defaults to false, so without this there is no plot.
+  dconf write "${d}/memory-header-show" true
+  dconf write "${d}/memory-header-graph" true
+  dconf write "${d}/memory-header-graph-width" 80
+  dconf write "${d}/memory-header-graph-breakdown" true
+  dconf write "${d}/memory-header-percentage" true
+  dconf write "${d}/memory-header-bars" false
+  dconf write "${d}/memory-update" 2.0
+
+  # Keep the panel to memory alone. GPU stats in particular stay off: enabling
+  # them is a known cause of periodic desktop hiccups.
+  dconf write "${d}/processor-header-show" false
+  dconf write "${d}/storage-header-show" false
+  dconf write "${d}/network-header-show" false
+  dconf write "${d}/gpu-header-show" false
+}
+
+install_memory_monitor() {
+  local uuid="$MEMORY_MONITOR_UUID"
+
+  if [[ -d "${HOME}/.local/share/gnome-shell/extensions/${uuid}" ]]; then
+    log "Astra Monitor already installed; refreshing settings."
+    enable_gnome_extension "$uuid"
+    configure_memory_monitor
+    return 0
+  fi
+
+  local shell_major
+  shell_major="$(gnome-shell --version 2>/dev/null | grep -oE '[0-9]+' | head -1)"
+  if [[ -z "$shell_major" ]]; then
+    warn "Could not determine the GNOME Shell version; skipping Astra Monitor."
+    return 0
+  fi
+
+  local info
+  info="$(curl -fsSL "https://extensions.gnome.org/extension-info/?pk=${MEMORY_MONITOR_EGO_ID}&shell_version=${shell_major}" 2>/dev/null || true)"
+  if [[ -z "$info" ]]; then
+    warn "Could not reach extensions.gnome.org; skipping Astra Monitor."
+    return 0
+  fi
+
+  # The API hands back a version_tag even for shell versions the extension does
+  # not support, so trust shell_version_map instead of the top-level fields.
+  local tag
+  tag="$(printf '%s' "$info" | python3 -c 'import json, sys
+entry = json.load(sys.stdin).get("shell_version_map", {}).get(sys.argv[1])
+print(entry["pk"] if entry else "")' "$shell_major" 2>/dev/null || true)"
+  if [[ -z "$tag" ]]; then
+    warn "Astra Monitor publishes no build for GNOME Shell ${shell_major}; skipping."
+    return 0
+  fi
+
+  local zip
+  zip="$(mktemp --suffix=.shell-extension.zip)"
+  log "Downloading Astra Monitor build ${tag} for GNOME Shell ${shell_major}..."
+  if curl -fsSL "https://extensions.gnome.org/download-extension/${uuid}.shell-extension.zip?version_tag=${tag}" -o "$zip"; then
+    # install --force also compiles the extension's gsettings schemas for us.
+    if gnome-extensions install --force "$zip"; then
+      log "Installed $(name "$uuid")."
+      enable_gnome_extension "$uuid"
+      configure_memory_monitor
+    else
+      warn "gnome-extensions install failed for Astra Monitor."
+    fi
+  else
+    warn "Could not download Astra Monitor from extensions.gnome.org."
+  fi
+  rm -f "$zip"
+}
+
+maybe_install_memory_monitor() {
+  if ! is_gnome; then
+    log "Skipping memory monitor (not a GNOME session)."
+    return 0
+  fi
+
+  local tool
+  for tool in gnome-extensions gsettings curl python3; do
+    if ! command -v "$tool" &>/dev/null; then
+      warn "Skipping memory monitor: ${tool} not found."
+      return 0
+    fi
+  done
+
+  local prompt="${C_GREEN}[sidorenko_dotfiles] Install Astra Monitor (memory graph in the top bar)? [y/N] ${C_RESET}"
+  if ! confirm_yes_no "$prompt" N; then
+    log "Skipped memory monitor."
+    return 0
+  fi
+
+  install_memory_monitor
+  log "Log out and back in to load it — Wayland cannot restart GNOME Shell in place."
+}
+
 install_nvim_plugins() {
   # Pin plugins to the commits in nvim/lazy-lock.json. Without this, lazy.nvim
   # auto-installs missing plugins at the latest branch commit and overwrites
@@ -1036,6 +1177,7 @@ main() {
   fi
   if has_gui; then
     maybe_configure_gnome
+    maybe_install_memory_monitor
   else
     log "Skipping GNOME tweaks (headless)"
   fi
