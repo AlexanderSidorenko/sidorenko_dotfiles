@@ -17,8 +17,9 @@ alacritty/          — Alacritty terminal config (TOML; alacritty itself instal
 nvim/               — Neovim config (LazyVim-based, Lua)
 ranger/             — ranger file manager config
 claude/             — Claude Code config (settings.json, CLAUDE.md, skills/; symlinked into ~/.claude)
-bin/                — custom scripts (clip, ram-health, ssh-host-setup.sh,
+bin/                — custom scripts (clip, mem, ram-health, ssh-host-setup.sh,
                       zswap-setup.sh, neovide)
+bin/lib/            — sourced helpers, not executables (meminfo.sh)
 githooks/           — this repo's own git hooks (commit-msg enforces [job] prefix)
 ```
 
@@ -57,6 +58,16 @@ zsh -n shrc             # syntax check (zsh parser)
 shellcheck shrc         # lint
 bash -n install.sh && shellcheck install.sh
 bash -n bin/ssh-host-setup.sh && shellcheck bin/ssh-host-setup.sh
+```
+
+Scripts that source something from `bin/lib/` need `shellcheck -x` so it follows
+the `source` line; plain `shellcheck` reports SC1091 and never checks the library's
+contribution:
+
+```bash
+bash -n bin/mem && shellcheck -x bin/mem
+bash -n bin/ram-health && shellcheck -x bin/ram-health
+shellcheck bin/lib/meminfo.sh    # has a `shell=bash` directive, no shebang
 ```
 
 ## Important notes

@@ -1,0 +1,481 @@
+#!/usr/bin/env bash
+# mem — one screen answering "what is memory doing right now".
+#
+# WHY
+#
+# free(1) cannot answer it. Its "used" is one of four possible arithmetics, it has
+# no idea zswap exists, and it says nothing about pressure or commitment — the two
+# numbers that predict a freeze rather than describe the present. Its cache figure
+# is actively misleading on a desktop, because tmpfs and GPU buffers land in Shmem,
+# which is filed under Cached but can only leave via swap.
+#
+# So this is duf for memory: one bar per pool, sized and coloured by component, at
+# a glance. It deliberately does not overlap bin/ram-health, which answers a
+# different question ("am I in trouble, and why") with a verdict, a sampling
+# interval and twelve sections. This one is instant and glanceable; that one is a
+# diagnosis.
+#
+# The stacked RAM bar shows what the usual views hide:
+#   - cache is Cached MINUS Shmem, or shmem is double-counted
+#   - zswap gets its own segment: the pool is real RAM that appears in no
+#     conventional bucket, so it otherwise vanishes
+#   - "other" is an explicit remainder. The segments do not sum to MemTotal on
+#     their own — page tables, kernel stacks, vmalloc and driver allocations are
+#     missing, which measured 11% of RAM on the machine this was written on. Too
+#     large to hide, so it is drawn rather than silently dropped.
+#
+# Colour carries the meaning: green is headroom you can still take, amber and
+# magenta are memory genuinely spoken for.
+#
+# Read-only and unprivileged. No sleep, so it returns immediately — every field it
+# reads is point-in-time. Rate counters live in ram-health, which has an interval
+# to sample them over.
+#
+# Usage:
+#   mem [--top] [--tunables] [--all] [--watch N] [--no-color] [--help]
+#
+#   --top        add biggest consumers, by RSS and by swap held
+#   --tunables   add reclaim tunables and the zswap compressor check
+#   --all        every panel
+#   --watch N    redraw every N seconds until interrupted
+#   --no-color   plain output (also automatic when stdout is not a terminal)
+#
+# Env fallbacks: MEM_WATCH, NO_COLOR
+
+set -euo pipefail
+
+# Shared /proc readers; see the WHY in that file for what they encode.
+# shellcheck source-path=SCRIPTDIR
+source "$(dirname "${BASH_SOURCE[0]}")/lib/meminfo.sh"
+
+WATCH="${MEM_WATCH:-0}"
+SHOW_TOP=0
+SHOW_TUNABLES=0
+USE_COLOR=1
+
+[[ -t 1 ]] || USE_COLOR=0
+[[ -n "${NO_COLOR:-}" ]] && USE_COLOR=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  --top)
+    SHOW_TOP=1
+    shift
+    ;;
+  --tunables)
+    SHOW_TUNABLES=1
+    shift
+    ;;
+  --all)
+    SHOW_TOP=1
+    SHOW_TUNABLES=1
+    shift
+    ;;
+  --watch)
+    WATCH="${2:?--watch needs a number of seconds}"
+    shift 2
+    ;;
+  --watch=*)
+    WATCH="${1#*=}"
+    shift
+    ;;
+  --no-color | --no-colour)
+    USE_COLOR=0
+    shift
+    ;;
+  -h | --help)
+    sed -n '/^# Usage:/,/^# Env fallbacks/p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+  *)
+    printf 'mem: unknown argument: %s\n' "$1" >&2
+    exit 1
+    ;;
+  esac
+done
+
+if ! [[ "$WATCH" =~ ^[0-9]+$ ]]; then
+  printf 'mem: --watch takes a positive integer number of seconds\n' >&2
+  exit 1
+fi
+
+# ---------- palette ----------
+
+if ((USE_COLOR)); then
+  C_ANON="$(printf '\033[38;5;214m')"  # amber   — swap-only, the real cost
+  C_SHMEM="$(printf '\033[38;5;170m')" # magenta — swap-backed, hides in cache
+  C_CACHE="$(printf '\033[38;5;71m')"  # green   — droppable, yours for the taking
+  C_SLAB="$(printf '\033[38;5;68m')"   # blue    — kernel, partly reclaimable
+  C_ZSWAP="$(printf '\033[38;5;44m')"  # cyan    — compressed pool, real RAM
+  C_OTHER="$(printf '\033[38;5;244m')" # grey    — kernel remainder
+  C_FREE="$(printf '\033[38;5;238m')"  # dim     — untouched
+  BOLD="$(printf '\033[1m')"
+  DIM="$(printf '\033[2m')"
+  RED="$(printf '\033[0;31m')"
+  YELLOW="$(printf '\033[0;33m')"
+  GREEN="$(printf '\033[0;32m')"
+  RESET="$(printf '\033[0m')"
+else
+  C_ANON="" C_SHMEM="" C_CACHE="" C_SLAB="" C_ZSWAP="" C_OTHER="" C_FREE=""
+  BOLD="" DIM="" RED="" YELLOW="" GREEN="" RESET=""
+fi
+
+# Glyphs differ as well as colours, so a piped or colourless run still
+# distinguishes the components.
+G_ANON="█" G_SHMEM="▒" G_CACHE="▓" G_SLAB="█" G_ZSWAP="█" G_OTHER="▒" G_FREE="░"
+
+# ---------- layout primitives ----------
+
+# Terminal width. $COLUMNS is unreliable — it reads 0 when not interactive — so
+# ask tput and clamp to something a box can live in.
+term_width() {
+  local w
+  w="$(tput cols 2>/dev/null || echo 80)"
+  [[ "$w" =~ ^[0-9]+$ ]] || w=80
+  ((w < 60)) && w=60
+  ((w > 120)) && w=120
+  printf '%d' "$w"
+}
+
+rep() {
+  local ch="$1" n="$2" out=""
+  local i
+  for ((i = 0; i < n; i++)); do out+="$ch"; done
+  printf '%s' "$out"
+}
+
+# Visible length, ignoring SGR escapes. Padding a coloured string with ${#s}
+# counts the escape bytes and skews every box edge, so strip them first.
+vislen() {
+  local s
+  s="$(printf '%s' "$1" | sed "s/$(printf '\033')\[[0-9;]*m//g")"
+  printf '%d' "${#s}"
+}
+
+box_top() {
+  local title="$1" w="$2" label
+  label="─ ${title} "
+  printf '%s╭%s%s%s\n' "$DIM" "$label" "$(rep '─' $((w - $(vislen "$label") - 2)))" "╮$RESET"
+}
+
+box_bottom() {
+  local w="$1"
+  printf '%s╰%s╯%s\n' "$DIM" "$(rep '─' $((w - 2)))" "$RESET"
+}
+
+# A content line, padded so the right border lands in the same column.
+box_row() {
+  local content="$1" w="$2" pad
+  pad=$((w - 4 - $(vislen "$content")))
+  ((pad < 0)) && pad=0
+  printf '%s│%s %s%s %s│%s\n' "$DIM" "$RESET" "$content" "$(rep ' ' "$pad")" "$DIM" "$RESET"
+}
+
+# Cell counts for a stacked bar, summing to exactly $1 columns.
+#
+# Largest-remainder apportionment. Naive per-segment rounding leaves the bar a
+# column or two short or long depending on the values, which under --watch makes
+# the whole box twitch every refresh.
+bar_cells() {
+  local width="$1" values="$2"
+  awk -v w="$width" -v vals="$values" 'BEGIN {
+    n = split(vals, v, " ")
+    total = 0
+    for (i = 1; i <= n; i++) { if (v[i] < 0) v[i] = 0; total += v[i] }
+    if (total <= 0) { for (i = 1; i <= n; i++) printf "0 "; exit }
+    used = 0
+    for (i = 1; i <= n; i++) {
+      exact = v[i] * w / total
+      c[i] = int(exact)
+      frac[i] = exact - c[i]
+      used += c[i]
+    }
+    left = w - used
+    while (left > 0) {
+      best = 0; bestf = -1
+      for (i = 1; i <= n; i++) if (frac[i] > bestf) { bestf = frac[i]; best = i }
+      if (best == 0) break
+      c[best]++; frac[best] = -1; left--
+    }
+    for (i = 1; i <= n; i++) printf "%d ", c[i]
+  }'
+}
+
+# A single-value bar, e.g. used-of-total.
+simple_bar() {
+  local used="$1" total="$2" width="$3" colour="$4" glyph="$5"
+  local cells
+  read -r cells _ <<<"$(bar_cells "$width" "$used $((total - used))")"
+  printf '%s%s%s%s%s%s' \
+    "$colour" "$(rep "$glyph" "$cells")" "$RESET" \
+    "$C_FREE" "$(rep "$G_FREE" $((width - cells)))" "$RESET"
+}
+
+swatch() {
+  local colour="$1" glyph="$2" label="$3"
+  printf '%s%s%s %s' "$colour" "$glyph" "$RESET" "$label"
+}
+
+# Pack pre-rendered items into lines of at most $1 visible columns, one per line
+# of output. The legend has seven entries whose labels vary in length with the
+# numbers in them, so a hardcoded two-row split overflows the box at 60 columns
+# and wastes space at 120. Let the width decide.
+pack_rows() {
+  local maxw="$1"
+  shift
+  local line="" item
+  for item in "$@"; do
+    if [[ -z "$line" ]]; then
+      line="$item"
+    elif (($(vislen "$line") + 3 + $(vislen "$item") <= maxw)); then
+      line+="   $item"
+    else
+      printf '%s\n' "$line"
+      line="$item"
+    fi
+  done
+  [[ -n "$line" ]] && printf '%s\n' "$line"
+}
+
+# Colour a PSI figure by how much it hurts: "full" double digits is a freeze.
+psi_colour() {
+  local v="$1"
+  if fge "$v" 10; then printf '%s' "$RED"
+  elif fge "$v" 1; then printf '%s' "$YELLOW"
+  else printf '%s' "$GREEN"
+  fi
+}
+
+# ---------- panels ----------
+
+panel_ram() {
+  local w="$1"
+  local total free anon shmem cached cache_excl slab buffers zswap other avail sreclaim
+  total="$(mi MemTotal)"
+  free="$(mi MemFree)"
+  anon="$(mi AnonPages)"
+  shmem="$(mi Shmem)"
+  cached="$(mi Cached)"
+  slab="$(mi Slab)"
+  buffers="$(mi Buffers)"
+  zswap="$(mi Zswap)"
+  avail="$(mi MemAvailable)"
+  sreclaim="$(mi SReclaimable)"
+
+  # Shmem is counted inside Cached, so subtract it or it lands in the bar twice.
+  cache_excl=$((cached - shmem))
+  ((cache_excl < 0)) && cache_excl=0
+  local kernel=$((slab + buffers))
+  other=$((total - anon - shmem - cache_excl - kernel - zswap - free))
+  ((other < 0)) && other=0
+
+  local inner=$((w - 4))
+  local ca cs cc ck cz co cf
+  read -r ca cs cc ck cz co cf _ <<<"$(bar_cells "$inner" \
+    "$anon $shmem $cache_excl $kernel $zswap $other $free")"
+
+  box_top "RAM ─ $(hks "$total")" "$w"
+  box_row "$(printf '%s%s%s%s%s%s%s%s%s%s%s%s%s%s' \
+    "$C_ANON$(rep "$G_ANON" "$ca")" "$RESET" \
+    "$C_SHMEM$(rep "$G_SHMEM" "$cs")" "$RESET" \
+    "$C_CACHE$(rep "$G_CACHE" "$cc")" "$RESET" \
+    "$C_SLAB$(rep "$G_SLAB" "$ck")" "$RESET" \
+    "$C_ZSWAP$(rep "$G_ZSWAP" "$cz")" "$RESET" \
+    "$C_OTHER$(rep "$G_OTHER" "$co")" "$RESET" \
+    "$C_FREE$(rep "$G_FREE" "$cf")" "$RESET")" "$w"
+  local legend_line
+  while IFS= read -r legend_line; do
+    box_row "$legend_line" "$w"
+  done < <(pack_rows "$inner" \
+    "$(swatch "$C_ANON" "$G_ANON" "anon $(hks "$anon")")" \
+    "$(swatch "$C_SHMEM" "$G_SHMEM" "shmem $(hks "$shmem")")" \
+    "$(swatch "$C_CACHE" "$G_CACHE" "cache $(hks "$cache_excl")")" \
+    "$(swatch "$C_SLAB" "$G_SLAB" "kernel $(hks "$kernel")")" \
+    "$(swatch "$C_ZSWAP" "$G_ZSWAP" "zswap $(hks "$zswap")")" \
+    "$(swatch "$C_OTHER" "$G_OTHER" "other $(hks "$other")")" \
+    "$(swatch "$C_FREE" "$G_FREE" "free $(hks "$free")")")
+  box_row "${BOLD}avail $(hks "$avail")${RESET} ($(pct "$avail" "$total")%)   ${DIM}reclaimable cache $(hks $((cache_excl + sreclaim)))${RESET}" "$w"
+  box_bottom "$w"
+}
+
+panel_swap() {
+  local w="$1"
+  local total_kb
+  total_kb="$(mi SwapTotal)"
+  box_top "SWAP ─ $(hks "$total_kb")" "$w"
+
+  if ((total_kb == 0)); then
+    box_row "${YELLOW}none active${RESET} ${DIM}— reclaim can only evict page cache${RESET}" "$w"
+    box_bottom "$w"
+    return 0
+  fi
+
+  # --bytes keeps the arithmetic honest; everything else here is kB.
+  local name size used prio bar barw label
+  barw=$((w - 40))
+  ((barw < 10)) && barw=10
+  while read -r name size used prio; do
+    [[ -n "$name" ]] || continue
+    bar="$(simple_bar $((used / 1024)) $((size / 1024)) "$barw" "$C_ANON" "$G_ANON")"
+    label="$(printf '%-14s %6s' "$name" "$(hks $((size / 1024)))")"
+    box_row "$label $bar $(printf '%3s%%' "$(pct "$used" "$size")") ${DIM}prio $prio${RESET}" "$w"
+  done < <(swapon --noheadings --bytes --show=NAME,SIZE,USED,PRIO 2>/dev/null || true)
+  box_bottom "$w"
+}
+
+panel_zswap() {
+  local w="$1"
+  local live
+  live="$(zswap_compressor_live)"
+
+  if ! zswap_enabled; then
+    box_top "ZSWAP" "$w"
+    if [[ -e /sys/block/zram0 ]]; then
+      box_row "${YELLOW}disabled${RESET} ${DIM}— but zram0 is active, so compression lives there${RESET}" "$w"
+    else
+      box_row "${YELLOW}disabled${RESET} ${DIM}— swap goes to disk at device latency${RESET}" "$w"
+    fi
+    box_bottom "$w"
+    return 0
+  fi
+
+  local comp_kb orig_kb maxpct total maxpool barw
+  comp_kb="$(mi Zswap)"
+  orig_kb="$(mi Zswapped)"
+  maxpct="$(zswap_param max_pool_percent)"
+  [[ "$maxpct" =~ ^[0-9]+$ ]] || maxpct=20
+  total="$(mi MemTotal)"
+  maxpool=$((total * maxpct / 100))
+  # 32 columns of labels precede the bar and 6 follow it, of the w-4 interior.
+  # The middle field is 11 wide on both rows -- ' of %6s ' is 11, not 12 -- or the
+  # two bars start in different columns and cannot be compared by eye.
+  barw=$((w - 42))
+  ((barw < 10)) && barw=10
+
+  box_top "ZSWAP ─ ${live:-?}" "$w"
+  box_row "$(printf '%-14s %6s' "pool" "$(hks "$comp_kb")")$(printf ' of %6s ' "$(hks "$maxpool")")$(simple_bar "$comp_kb" "$maxpool" "$barw" "$C_ZSWAP" "$G_ZSWAP")$(printf ' %5s' "$(pct "$comp_kb" "$maxpool")%")" "$w"
+  if ((comp_kb > 0)); then
+    local ratio
+    ratio="$(awk -v o="$orig_kb" -v c="$comp_kb" 'BEGIN { printf "%.2f", o / c }')"
+
+    # Second bar, on the same bytes-per-column scale as the pool bar above, so the
+    # difference in length between them IS the compression.
+    #
+    # The ratio goes in the trailing column, where the pool row puts its percentage
+    # — one metric per row, annotating that row's bar. It used to sit beside the
+    # size, where "2.2G ×3.05" read as a multiplication of the two numbers rather
+    # than as a property of the bar. Sizes stay in one column so pool and holds can
+    # be compared vertically.
+    box_row "$(printf '%-14s %6s' "holds" "$(hks "$orig_kb")")$(printf '%11s' "")$(simple_bar "$orig_kb" "$maxpool" "$barw" "$C_ANON" "$G_ANON")$(printf ' %5s' "×${ratio}")" "$w"
+    local caption cap_line
+    if ((orig_kb > maxpool)); then
+      # At a 3:1 ratio a full pool holds three times max_pool_percent, so the bar
+      # pegs. Say so, rather than letting a full-width bar read as exactly full.
+      caption="${DIM}clamped — uncompressed exceeds the ceiling${RESET}"
+    else
+      caption="${DIM}both bars, one scale${RESET}"
+    fi
+    # Packed rather than printed flat: the clamped caption plus "saved" runs past
+    # the interior at 60 and 70 columns.
+    while IFS= read -r cap_line; do
+      box_row "$cap_line" "$w"
+    done < <(pack_rows $((w - 4)) "$caption" "saved $(hks $((orig_kb - comp_kb)))")
+  else
+    box_row "${DIM}pool empty — nothing has been swapped out yet${RESET}" "$w"
+  fi
+  if zswap_compressor_mismatch; then
+    box_row "${RED}${BOLD}!! cmdline asked for $(zswap_compressor_wanted), kernel runs ${live}${RESET}" "$w"
+  fi
+  box_bottom "$w"
+}
+
+panel_pressure() {
+  local w="$1"
+  local s10 s60 s300 f10 f60 f300 committed limit barw
+  s10="$(psi some avg10)" s60="$(psi some avg60)" s300="$(psi some avg300)"
+  f10="$(psi full avg10)" f60="$(psi full avg60)" f300="$(psi full avg300)"
+  committed="$(mi Committed_AS)"
+  limit="$(mi CommitLimit)"
+  # 38 columns of fixed labels precede the bar, and the box interior is w-4.
+  barw=$((w - 42))
+  ((barw < 10)) && barw=10
+
+  box_top "PRESSURE" "$w"
+  box_row "$(printf '%-14s' "some")$(psi_colour "$s60")$(printf '%6s%% %6s%% %6s%%' "$s10" "$s60" "$s300")${RESET} ${DIM}avg10 avg60 avg300${RESET}" "$w"
+  box_row "$(printf '%-14s' "full")$(psi_colour "$f60")$(printf '%6s%% %6s%% %6s%%' "$f10" "$f60" "$f300")${RESET} ${DIM}all tasks blocked${RESET}" "$w"
+  box_row "$(printf '%-14s %6s' "commit" "$(hks "$committed")")$(printf ' of %6s ' "$(hks "$limit")")$(simple_bar "$committed" "$limit" "$barw" "$C_ANON" "$G_ANON") $(printf '%3s%%' "$(pct "$committed" "$limit")")" "$w"
+  box_bottom "$w"
+}
+
+panel_top() {
+  local w="$1"
+  box_top "TOP ─ by RSS" "$w"
+  while read -r rss pid comm; do
+    [[ -n "$pid" ]] || continue
+    box_row "$(printf '%-24s %-8s %8s' "$comm" "$pid" "$(hks "$rss")")" "$w"
+  done < <(ps -eo rss=,pid=,comm= --sort=-rss 2>/dev/null | head -5)
+  box_bottom "$w"
+
+  box_top "TOP ─ by swap held" "$w"
+  local any=0
+  while read -r kb pid comm; do
+    [[ -n "$pid" ]] || continue
+    any=1
+    box_row "$(printf '%-24s %-8s %8s' "$comm" "$pid" "$(hks "$kb")")" "$w"
+  done < <(
+    for proc in /proc/[0-9]*; do
+      [[ -r "$proc/status" ]] || continue
+      kb="$(awk '/^VmSwap:/ { print $2 }' "$proc/status" 2>/dev/null || true)"
+      [[ -n "$kb" && "$kb" -gt 10240 ]] 2>/dev/null || continue
+      printf '%s %s %s\n' "$kb" "${proc#/proc/}" "$(cat "$proc/comm" 2>/dev/null || echo '?')"
+    done | sort -rn | head -5
+  )
+  ((any)) || box_row "${DIM}nothing holding more than 10 MiB in swap${RESET}" "$w"
+  box_bottom "$w"
+}
+
+panel_tunables() {
+  local w="$1"
+  box_top "RECLAIM TUNABLES" "$w"
+  local k
+  for k in vm.swappiness vm.page-cluster vm.min_free_kbytes vm.watermark_scale_factor; do
+    box_row "$(printf '%-28s %s' "$k" "$(sysctl -n "$k" 2>/dev/null || echo '?')")" "$w"
+  done
+  box_row "$(printf '%-28s %s' "MGLRU" "$(cat /sys/kernel/mm/lru_gen/enabled 2>/dev/null || echo 'not present')")" "$w"
+  box_row "${DIM}swappiness: 60 disk-only, ~100 zswap, ~180 zram.${RESET}" "$w"
+  box_bottom "$w"
+}
+
+# ---------- render ----------
+
+render() {
+  local w
+  w="$(term_width)"
+  panel_ram "$w"
+  panel_swap "$w"
+  panel_zswap "$w"
+  panel_pressure "$w"
+  ((SHOW_TOP)) && panel_top "$w"
+  ((SHOW_TUNABLES)) && panel_tunables "$w"
+  return 0
+}
+
+if ((WATCH > 0)); then
+  # Redraw from cursor-home rather than clearing: clearing every frame flickers.
+  # \033[J after each frame wipes anything left over when the output shrinks.
+  # EXIT does the restoring; INT/TERM must actually leave, or the handler returns
+  # into the loop and the redraw carries on after Ctrl-C.
+  cleanup() { printf '\033[?25h\033[0m\n'; }
+  trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  printf '\033[?25l\033[2J'
+  while :; do
+    printf '\033[H'
+    render
+    printf '\033[J'
+    sleep "$WATCH"
+  done
+fi
+
+render
