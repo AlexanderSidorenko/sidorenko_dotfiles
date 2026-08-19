@@ -17,7 +17,8 @@ alacritty/          — Alacritty terminal config (TOML; alacritty itself instal
 nvim/               — Neovim config (LazyVim-based, Lua)
 ranger/             — ranger file manager config
 claude/             — Claude Code config (settings.json, CLAUDE.md, skills/; symlinked into ~/.claude)
-bin/                — custom scripts (clip, ssh-host-setup.sh, neovide)
+bin/                — custom scripts (clip, ram-health, ssh-host-setup.sh,
+                      zswap-setup.sh, neovide)
 githooks/           — this repo's own git hooks (commit-msg enforces [job] prefix)
 ```
 

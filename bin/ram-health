@@ -1,0 +1,374 @@
+#!/usr/bin/env bash
+# ram-health — one-screen verdict on this machine's memory health.
+#
+# WHY
+#
+# Diagnosing a memory-pressure freeze means correlating a dozen sources that live
+# nowhere near each other: /proc/pressure/memory, /proc/vmstat, /proc/meminfo,
+# /proc/swaps, cgroup memory.events, oomctl, and debugfs. Worse, the failure mode
+# is quiet. When the kernel runs out of headroom the desktop stalls and
+# systemd-oomd SIGKILLs the largest cgroup in the session — usually the browser —
+# which leaves no crash report, no shutdown checkpoint, and no kernel oom_kill
+# counter. It reads as an unexplained application crash rather than a kill.
+#
+# This script collects the things that actually matter, and leads with a verdict
+# so the answer is the first line rather than something you derive.
+#
+# Two habits it deliberately encodes:
+#   - Swap/fault counters are sampled as a RATE, never reported as lifetime
+#     totals. Lifetime totals on a long-uptime box are actively misleading: a
+#     number accumulated over two weeks says nothing about right now.
+#   - Committed_AS is compared against RAM + swap. That inequality is the
+#     structural predictor of the freeze, and nothing in `free` surfaces it.
+#
+# Read-only. Runs fine as an ordinary user; the zswap efficacy section needs root
+# because debugfs is 0700, and the script says so rather than silently skipping.
+#
+# Usage:
+#   ram-health [--interval N] [--brief] [--help]
+#
+#   --interval N   seconds to sample swap/fault rates over (default 3)
+#   --brief        verdict + pressure only, for a quick check
+#
+# Env fallbacks: INTERVAL, BRIEF=1
+
+set -euo pipefail
+
+GREEN="$(printf '\033[0;32m')"
+YELLOW="$(printf '\033[0;33m')"
+RED="$(printf '\033[0;31m')"
+DIM="$(printf '\033[2m')"
+BOLD="$(printf '\033[1m')"
+RESET="$(printf '\033[0m')"
+
+INTERVAL="${INTERVAL:-3}"
+BRIEF="${BRIEF:-}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  --interval)
+    INTERVAL="${2:?--interval needs a value}"
+    shift 2
+    ;;
+  --interval=*)
+    INTERVAL="${1#*=}"
+    shift
+    ;;
+  --brief)
+    BRIEF=1
+    shift
+    ;;
+  -h | --help)
+    sed -n '/^# Usage:/,/^# Env fallbacks/p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+  *)
+    printf '%bram-health: unknown argument: %s%b\n' "$RED" "$1" "$RESET" >&2
+    exit 1
+    ;;
+  esac
+done
+
+if ! [[ "$INTERVAL" =~ ^[0-9]+$ ]] || ((INTERVAL == 0)); then
+  printf '%bram-health: --interval must be a positive integer%b\n' "$RED" "$RESET" >&2
+  exit 1
+fi
+
+hdr() { printf '\n%b%s%b\n' "$BOLD" "$1" "$RESET"; }
+row() { printf '  %-30s %s\n' "$1" "$2"; }
+note() { printf '  %b%s%b\n' "$DIM" "$1" "$RESET"; }
+
+# ---------- readers ----------
+
+# A field from /proc/meminfo, in kB. Missing keys yield 0 so arithmetic is safe.
+mi() { awk -v k="$1:" '$1 == k { print $2; found = 1 } END { if (!found) print 0 }' /proc/meminfo; }
+
+# A counter from /proc/vmstat.
+vm() { awk -v k="$1" '$1 == k { print $2; found = 1 } END { if (!found) print 0 }' /proc/vmstat; }
+
+# A PSI value, e.g. psi full avg60. /proc/pressure/memory lines look like:
+#   full avg10=0.00 avg60=2.08 avg300=5.66 total=98859245
+psi() {
+  awk -v row="$1" -v key="$2" '
+    $1 == row {
+      for (i = 2; i <= NF; i++) {
+        split($i, kv, "=")
+        if (kv[1] == key) { print kv[2]; found = 1 }
+      }
+    }
+    END { if (!found) print 0 }
+  ' /proc/pressure/memory
+}
+
+# A kernel cmdline parameter's value, e.g. `kcmdline zswap.compressor`. Empty
+# when the parameter was not passed at all.
+kcmdline() {
+  awk -v k="$1=" '
+    {
+      for (i = 1; i <= NF; i++)
+        if (index($i, k) == 1) { print substr($i, length(k) + 1); found = 1 }
+    }
+    END { if (!found) print "" }
+  ' /proc/cmdline
+}
+
+# Is a crypto algorithm registered right now? zswap can only use one that is.
+crypto_has() {
+  awk -v c="$1" '$1 == "name" && $3 == c { f = 1 } END { exit !f }' /proc/crypto
+}
+
+# Float comparison: succeeds when $1 >= $2.
+fge() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a >= b) }'; }
+
+# kB -> human. Kept separate from numfmt so the units match /proc conventions.
+hk() {
+  awk -v k="$1" 'BEGIN {
+    if (k >= 1048576) printf "%.1f GiB", k / 1048576
+    else if (k >= 1024) printf "%.0f MiB", k / 1024
+    else printf "%d KiB", k
+  }'
+}
+
+pct() { awk -v a="$1" -v b="$2" 'BEGIN { if (b > 0) printf "%.0f", a * 100 / b; else printf "0" }'; }
+
+# ---------- sample rates before anything else, since the verdict needs them ----------
+
+s_in_a="$(vm pswpin)"
+s_out_a="$(vm pswpout)"
+s_maj_a="$(vm pgmajfault)"
+sleep "$INTERVAL"
+s_in_b="$(vm pswpin)"
+s_out_b="$(vm pswpout)"
+s_maj_b="$(vm pgmajfault)"
+
+rate_in=$(((s_in_b - s_in_a) / INTERVAL))
+rate_out=$(((s_out_b - s_out_a) / INTERVAL))
+rate_maj=$(((s_maj_b - s_maj_a) / INTERVAL))
+
+full60="$(psi full avg60)"
+full10="$(psi full avg10)"
+some60="$(psi some avg60)"
+
+# ---------- configuration drift ----------
+
+# A zswap knob on the kernel cmdline is a *request*, not a guarantee. The
+# compressor is honoured only if its crypto algorithm is available when zswap
+# initialises; when the algorithm lives in a loadable module (Ubuntu ships zstd
+# as CONFIG_CRYPTO_ZSTD=m) it is not there that early, so the kernel logs one
+# line and falls back to CONFIG_ZSWAP_COMPRESSOR_DEFAULT. That single boot
+# message is the only notice you ever get: every later view -- free(1),
+# swapon(8), even this script's own parameter dump -- reports the fallback as
+# though it were the intended setting. So compare want against have explicitly.
+warnings=()
+
+zswap_live_comp="$(cat /sys/module/zswap/parameters/compressor 2>/dev/null || true)"
+zswap_want_comp="$(kcmdline zswap.compressor)"
+comp_mismatch=""
+if [[ -n "$zswap_want_comp" && -n "$zswap_live_comp" &&
+  "$zswap_want_comp" != "$zswap_live_comp" ]]; then
+  comp_mismatch=1
+  warnings+=("COMPRESSOR MISMATCH: cmdline asked for '${zswap_want_comp}', kernel is using '${zswap_live_comp}'")
+fi
+
+# Same class of silent failure, one level up: zswap itself requested but off.
+zswap_live_en="$(cat /sys/module/zswap/parameters/enabled 2>/dev/null || true)"
+if [[ "$(kcmdline zswap.enabled)" == "1" && "$zswap_live_en" != "Y" ]]; then
+  warnings+=("zswap is requested on the cmdline but is NOT enabled (enabled=${zswap_live_en:-?})")
+fi
+
+# ---------- verdict ----------
+
+# Thresholds are calibrated against measured behaviour on a 16 GiB laptop: idle
+# sits around 40 major faults/s with full avg60 at 0.00, while a real freeze put
+# roughly 20-25 s of full stall inside a single minute. "full" is the meaningful
+# row -- it means every runnable task was blocked on memory, which is what a
+# freeze actually is; "some" only means at least one task waited.
+verdict="HEALTHY"
+verdict_colour="$GREEN"
+verdict_why="no measurable stalling"
+
+if fge "$full60" 10 || ((rate_maj > 1000)); then
+  verdict="THRASHING"
+  verdict_colour="$RED"
+  verdict_why="the machine is stalling on memory right now"
+elif fge "$full60" 1 || fge "$some60" 20 || ((rate_out > 200)); then
+  verdict="PRESSURE"
+  verdict_colour="$YELLOW"
+  verdict_why="reclaim is working hard; a spike from here could stall"
+fi
+
+printf '%b%s%b  %b%s%b\n' "$verdict_colour$BOLD" "$verdict" "$RESET" "$DIM" "$verdict_why" "$RESET"
+
+# Loud, and above the fold on purpose: a misconfigured compressor costs a third
+# of the compression ratio while every other number on screen still looks fine.
+# Printed before the --brief exit so the quick check cannot miss it either.
+if ((${#warnings[@]} > 0)); then
+  for _w in "${warnings[@]}"; do
+    printf '%b!! %s%b\n' "$RED$BOLD" "$_w" "$RESET"
+  done
+fi
+
+hdr "Pressure (PSI) — share of time tasks were blocked on memory"
+row "some (>=1 task waiting)" "avg10 $(psi some avg10)%   avg60 ${some60}%   avg300 $(psi some avg300)%"
+row "full (ALL tasks blocked)" "avg10 ${full10}%   avg60 ${full60}%   avg300 $(psi full avg300)%"
+row "lifetime full stall" "$(awk -v u="$(psi full total)" 'BEGIN { printf "%.1f s", u / 1000000 }') over $(awk '{ printf "%.1f days", $1 / 86400 }' /proc/uptime) uptime"
+note "'full' is the freeze metric. Sustained double digits means you are losing the machine."
+
+if [[ -n "$BRIEF" ]]; then
+  exit 0
+fi
+
+hdr "Capacity vs commitment"
+mem_total="$(mi MemTotal)"
+swap_total="$(mi SwapTotal)"
+committed="$(mi Committed_AS)"
+capacity=$((mem_total + swap_total))
+row "RAM" "$(hk "$mem_total")"
+row "swap" "$(hk "$swap_total")"
+row "total capacity" "$(hk "$capacity")"
+row "Committed_AS" "$(hk "$committed")  ($(pct "$committed" "$capacity")% of capacity)"
+row "MemAvailable" "$(hk "$(mi MemAvailable)")"
+if ((committed > capacity)); then
+  printf '  %bOVERCOMMITTED%b — processes have been promised more than RAM+swap can hold.\n' "$YELLOW" "$RESET"
+  note "This is the structural predictor of a pressure freeze. free(1) will not show it."
+fi
+
+hdr "Thrash rate (sampled over ${INTERVAL}s — not lifetime totals)"
+row "major faults/s" "$rate_maj"
+row "pages swapped in/s" "$rate_in    ($(awk -v n="$rate_in" 'BEGIN { printf "%.1f MiB/s", n * 4 / 1024 }'))"
+row "pages swapped out/s" "$rate_out    ($(awk -v n="$rate_out" 'BEGIN { printf "%.1f MiB/s", n * 4 / 1024 }'))"
+
+hdr "Swap tiers (highest priority is consumed first)"
+swapon --show 2>/dev/null | sed 's/^/  /' || note "no swap devices active"
+
+hdr "Compressed swap"
+zswap_on="$(cat /sys/module/zswap/parameters/enabled 2>/dev/null || echo '-')"
+if [[ "$zswap_on" == "Y" ]]; then
+  row "zswap" "enabled"
+  for p in /sys/module/zswap/parameters/*; do
+    if [[ -r "$p" ]]; then
+      row "  $(basename "$p")" "$(cat "$p" 2>/dev/null)"
+    fi
+  done
+  if [[ -n "$comp_mismatch" ]]; then
+    printf '  %b!! compressor above is NOT the one requested on the cmdline (%s)%b\n' \
+      "$RED$BOLD" "$zswap_want_comp" "$RESET"
+    if crypto_has "$zswap_want_comp"; then
+      note "${zswap_want_comp} is registered now, so this is only a boot-order miss:"
+      note "  echo ${zswap_want_comp} | sudo tee /sys/module/zswap/parameters/compressor"
+    else
+      note "${zswap_want_comp} is not even registered in /proc/crypto — it lives in a"
+      note "loadable module that does not exist yet when zswap initialises."
+    fi
+    note "Durable fix is to put the module in the initramfs so it is there early:"
+    note "  echo ${zswap_want_comp} | sudo tee -a /etc/initramfs-tools/modules"
+    note "  sudo update-initramfs -u    # takes effect on the next boot"
+    note "bin/zswap-setup.sh does both; this is what it checks for."
+  fi
+elif [[ -e /sys/block/zram0 ]]; then
+  row "zram" "active on /dev/zram0"
+  row "  algorithm" "$(cat /sys/block/zram0/comp_algorithm 2>/dev/null || echo '?')"
+  row "  disksize" "$(awk -v b="$(cat /sys/block/zram0/disksize 2>/dev/null || echo 0)" 'BEGIN { printf "%.1f GiB", b / 1073741824 }')"
+else
+  row "compressed swap" "NONE — swap goes straight to disk at device latency"
+fi
+
+# Efficacy without privileges. /proc/meminfo is 0444 and carries both halves of
+# the ratio: Zswap is what the pool costs in RAM, Zswapped is the uncompressed
+# size of what it holds. Earlier this section reached straight for debugfs, which
+# is 0700 root, so an ordinary run printed nothing at all and the note claimed the
+# ratio needed sudo — while the GNOME panel widget had been reading these exact
+# two fields the whole time. Only the reject/writeback counters are truly
+# root-only; the number people actually want is not.
+#
+# cgroup v2 exposes the same pair per-cgroup as `zswap`/`zswapped` in
+# memory.stat, if attribution to one slice is ever wanted.
+if [[ "$zswap_on" == "Y" ]]; then
+  z_comp="$(mi Zswap)"
+  z_orig="$(mi Zswapped)"
+  row "pool cost in RAM" "$(hk "$z_comp")"
+  row "holds, uncompressed" "$(hk "$z_orig")"
+  if ((z_comp > 0)); then
+    row "compression ratio" "$(awk -v o="$z_orig" -v c="$z_comp" 'BEGIN { printf "%.2f:1", o / c }')"
+    row "RAM saved" "$(hk "$((z_orig - z_comp))")"
+    note "Ratio well under ~2:1 on anonymous pages means the compressor is"
+    note "underperforming — check it is the one you asked for, above."
+  else
+    note "pool is empty — the ratio only means something once pages have been swapped out"
+  fi
+fi
+
+# These have no unprivileged equivalent anywhere: not in /proc/meminfo, not in
+# cgroup memory.stat. debugfs is 0700 root and there is no group that grants
+# access to it, so root is the only way to see them.
+if [[ -r /sys/kernel/debug/zswap/pool_limit_hit ]]; then
+  row "pool_limit_hit" "$(cat /sys/kernel/debug/zswap/pool_limit_hit 2>/dev/null || echo 0)"
+  row "written_back_pages" "$(cat /sys/kernel/debug/zswap/written_back_pages 2>/dev/null || echo 0)"
+  row "reject_compress_poor" "$(cat /sys/kernel/debug/zswap/reject_compress_poor 2>/dev/null || echo 0)"
+  note "pool_limit_hit climbing => max_pool_percent is too small. Staying 0 => it is plenty."
+elif [[ "$zswap_on" == "Y" ]]; then
+  note "Eviction counters (pool_limit_hit, written_back_pages) need root — debugfs"
+  note "is 0700 and no group grants access. The ratio above does not need it:"
+  note "  sudo $0 --interval $INTERVAL"
+fi
+
+hdr "Shared memory"
+shmem="$(mi Shmem)"
+row "Shmem" "$(hk "$shmem")  ($(pct "$shmem" "$mem_total")% of RAM)"
+row "of which huge pages" "$(hk "$(mi ShmemHugePages)")"
+note "Neither anonymous nor ordinary page cache, so it hides from the usual views."
+note "GPU buffers, tmpfs and IPC land here and can grow quietly over a long session."
+
+hdr "Biggest consumers, by cgroup"
+systemd-cgtop -m --order=memory -b -n 1 2>/dev/null | head -12 | sed 's/^/  /' ||
+  note "systemd-cgtop unavailable"
+
+hdr "Biggest consumers, by process (RSS)"
+ps -eo rss=,pid=,comm= --sort=-rss 2>/dev/null | head -8 |
+  awk '{ rss = $1; pid = $2; $1 = ""; $2 = ""; sub(/^ +/, ""); printf "  %-26s pid %-8s %.0f MiB\n", $0, pid, rss / 1024 }'
+
+hdr "Most swapped-out processes"
+swap_hogs="$(
+  for proc in /proc/[0-9]*; do
+    [[ -r "$proc/status" ]] || continue
+    kb="$(awk '/^VmSwap:/ { print $2 }' "$proc/status" 2>/dev/null || true)"
+    [[ -n "$kb" && "$kb" -gt 10240 ]] 2>/dev/null || continue
+    printf '%s\t%s\t%s\n' "$kb" "${proc#/proc/}" "$(cat "$proc/comm" 2>/dev/null || echo '?')"
+  done | sort -rn | head -8 |
+    awk -F'\t' '{ printf "  %-26s pid %-8s %.0f MiB swapped\n", $3, $2, $1 / 1024 }'
+)"
+if [[ -n "$swap_hogs" ]]; then
+  printf '%s\n' "$swap_hogs"
+else
+  note "nothing with more than 10 MiB in swap"
+fi
+note "A long-lived process holding swap is often just stale — worth killing rather than tuning."
+
+hdr "How close to a systemd-oomd kill"
+if command -v oomctl >/dev/null 2>&1; then
+  oomctl 2>/dev/null | sed 's/^/  /' || note "oomctl produced no output"
+  note "oomd kills the highest-pressure DESCENDANT of a monitored cgroup, not the cgroup itself."
+  note "On a desktop that is almost always the browser, because it is the largest."
+else
+  note "oomctl not available"
+fi
+
+hdr "Kill history"
+row "kernel oom_kill (all time)" "$(vm oom_kill)"
+cg="/sys/fs/cgroup/user.slice/user-$(id -u).slice"
+if [[ -r "$cg/memory.events" ]]; then
+  row "user slice oom_kill" "$(awk '/^oom_kill /{ print $2 }' "$cg/memory.events" 2>/dev/null || echo 0)"
+  row "user slice oom_group_kill" "$(awk '/^oom_group_kill /{ print $2 }' "$cg/memory.events" 2>/dev/null || echo 0)"
+fi
+printf '  %bAll zeroes does NOT mean nothing was killed.%b systemd-oomd kills from userspace\n' "$YELLOW" "$RESET"
+note "and increment none of these counters. To see those:"
+note "  journalctl -u systemd-oomd --since '1 day ago'"
+
+hdr "Reclaim tunables in effect"
+row "vm.swappiness" "$(sysctl -n vm.swappiness 2>/dev/null || echo '?')"
+row "vm.page-cluster" "$(sysctl -n vm.page-cluster 2>/dev/null || echo '?')"
+row "vm.min_free_kbytes" "$(sysctl -n vm.min_free_kbytes 2>/dev/null || echo '?')"
+row "MGLRU" "$(cat /sys/kernel/mm/lru_gen/enabled 2>/dev/null || echo 'not present')"
+note "swappiness 60 suits disk-only swap; ~100 suits zswap; ~180 suits zram."
+
+printf '\n'
