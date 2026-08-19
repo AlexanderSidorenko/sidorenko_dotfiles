@@ -469,23 +469,45 @@ install_sudoers_dropin() {
 		die "$visudo rejected the generated sudoers drop-in — not installing it"
 	fi
 
+	# Does the EXISTING tree already fail `visudo -c`, before we touch anything?
+	# On a managed host a foreign drop-in can trip it for reasons unrelated to
+	# us — classically one that config management (Ansible, etc.) installs 0644
+	# instead of the 0440 visudo insists on. sudo still loads such a file at
+	# runtime, but `visudo -c` exits non-zero for the whole tree. Record that now
+	# so the post-install check below does not misattribute it to our drop-in and
+	# roll back a change that is actually fine — which would make it impossible to
+	# ever wire sudo on this host.
+	local tree_was_clean=1
+	"$visudo" --check >/dev/null 2>&1 || tree_was_clean=0
+
 	local restore=0
 	[[ -e $SUDOERS_DROPIN ]] && restore=1 && cp -a -- "$SUDOERS_DROPIN" "$tmp.prev"
 	install -o root -g root -m 0440 -- "$tmp" "$SUDOERS_DROPIN"
 	rm -f -- "$tmp"
 
-	# Now that it is in place, validate the tree as sudo will actually parse it.
+	# Validate the tree as sudo will actually parse it. Our drop-in already
+	# passed in isolation, so a remaining failure is either one we just
+	# introduced (roll back) or one that was already present before us (keep the
+	# validated drop-in and warn — rolling back would penalise us for someone
+	# else's file).
 	if ! "$visudo" --check >/dev/null 2>&1; then
-		if ((restore)); then
-			install -o root -g root -m 0440 -- "$tmp.prev" "$SUDOERS_DROPIN"
-		else
-			rm -f -- "$SUDOERS_DROPIN"
+		if ((tree_was_clean)); then
+			if ((restore)); then
+				install -o root -g root -m 0440 -- "$tmp.prev" "$SUDOERS_DROPIN"
+			else
+				rm -f -- "$SUDOERS_DROPIN"
+			fi
+			rm -f -- "$tmp.prev"
+			die "sudoers tree failed validation after adding the drop-in — rolled back"
 		fi
-		rm -f -- "$tmp.prev"
-		die "sudoers tree failed validation after adding the drop-in — rolled back"
+		warn "the sudoers tree already failed 'visudo -c' BEFORE this change —"
+		warn "almost certainly a pre-existing drop-in with the wrong mode. Run"
+		warn "'sudo visudo -c' to see which file. Our timestamp drop-in is valid"
+		warn "and has been kept; fix the other file at your leisure (sudo still"
+		warn "works either way)."
 	fi
 	rm -f -- "$tmp.prev"
-	info "  $SUDOERS_DROPIN: timestamp_timeout=0 (validated with ${visudo##*/})"
+	info "  $SUDOERS_DROPIN: timestamp_timeout=$SUDO_TIMESTAMP_TIMEOUT (validated with ${visudo##*/})"
 }
 
 # polkit 127 runs its auth helper as a socket-activated systemd unit
