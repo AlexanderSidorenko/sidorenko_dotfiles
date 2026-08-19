@@ -146,9 +146,14 @@ print_status() {
 	# The mapping file carries a comment header, so strip comments and blanks
 	# before pulling usernames — otherwise the header is printed as if it were
 	# a list of enrolled users.
+	# On a fresh install nobody is enrolled, so the mapping file is empty and
+	# `grep -v` matches nothing and exits 1. Under `set -euo pipefail` that would
+	# propagate out of the command substitution and abort the whole script mid
+	# status print, so the failure must be swallowed with `|| true`.
 	local users=''
-	[[ -r $authfile ]] &&
-		users=$(grep -v -e '^#' -e '^[[:space:]]*$' -- "$authfile" 2>/dev/null | cut -d: -f1 | paste -sd' ' -)
+	if [[ -r $authfile ]]; then
+		users=$(grep -v -e '^#' -e '^[[:space:]]*$' -- "$authfile" 2>/dev/null | cut -d: -f1 | paste -sd' ' - || true)
+	fi
 	if [[ -n $users ]]; then
 		printf '  enrolled:  %s\n' "$users"
 	else
