@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# tmux-restore — run the restore script that tmux-snapshot last generated.
+#
+# WHY
+#
+# The snapshot lands under XDG_STATE_HOME, which is not a path anybody wants to
+# type after a reboot. This is the front door: it finds the file, tells you how
+# old it is before running it, and forwards its flags.
+#
+# Recovery: --prev runs the previous generation instead. tmux-snapshot keeps one,
+# which matters because the snapshot rewrites itself on every layout change — if
+# a bad capture lands, the good one is still there for exactly one write.
+#
+# Usage:
+#   tmux-restore [--prev] [--no-attach] [--dry-run] [--path] [--help]
+#
+#   --prev         run the previous snapshot rather than the current one
+#   --path         print the snapshot path and exit
+#   --no-attach    create the sessions but do not attach
+#   --dry-run      print what would happen, change nothing
+#
+# Env fallbacks: TMUX_SNAPSHOT_OUT, XDG_STATE_HOME
+
+set -euo pipefail
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/tmux-snapshot"
+SNAP="${TMUX_SNAPSHOT_OUT:-$STATE_DIR/restore-tmux-sessions.sh}"
+PASS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  --prev)
+    SNAP="$SNAP.prev"
+    shift
+    ;;
+  --path)
+    printf '%s\n' "$SNAP"
+    exit 0
+    ;;
+  -h | --help)
+    sed -n '/^# Usage:/,/^# Env fallbacks/p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+  *)
+    PASS+=("$1")
+    shift
+    ;;
+  esac
+done
+
+if [[ ! -f "$SNAP" ]]; then
+  printf '\033[0;31mtmux-restore: no snapshot at %s\033[0m\n' "$SNAP" >&2
+  printf 'Take one while your sessions are up:  tmux-snapshot --force\n' >&2
+  exit 1
+fi
+
+age=$(( $(date +%s) - $(stat -c %Y "$SNAP") ))
+printf '\033[2mrestoring %s (captured %dh %dm ago)\033[0m\n' \
+  "$SNAP" "$((age / 3600))" "$(((age % 3600) / 60))"
+
+exec bash "$SNAP" ${PASS[@]+"${PASS[@]}"}

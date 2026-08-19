@@ -1,0 +1,509 @@
+#!/usr/bin/env bash
+# tmux-snapshot — capture the live tmux layout as a runnable restore script.
+#
+# WHY
+#
+# Long-lived tmux sessions are real state. Five of them here have been up for
+# days, each with a Claude conversation in window 1, and a reboot destroys all
+# of it: the session names, the window order, the working directories, and which
+# conversation belonged to which pane. None of that is recoverable afterwards
+# from anything the system keeps.
+#
+# So it gets captured while it exists. This writes a self-contained script that
+# recreates the layout, which is deliberately more useful than a data file: you
+# can read it, edit it, keep it, and run it on a box that has none of this
+# tooling installed.
+#
+# Three details carry the correctness of the whole thing:
+#
+#   - The foreground program of a pane is found via the tpgid field of
+#     /proc/<pane_pid>/stat, anchored to the pid TMUX ITSELF reports. Matching by
+#     tty name instead (ps -t pts/N) is wrong on this host: Docker containers
+#     have their own devpts namespaces, so pts/2 matches container processes that
+#     are in no pane at all.
+#   - argv is read from /proc/<pid>/cmdline, which is NUL-separated, so arguments
+#     containing spaces survive exactly. `ps args` flattens them and
+#     `--name nas services 1` can no longer be re-split correctly.
+#   - Window names are never emitted. automatic-rename regenerates them from
+#     pane_current_path and pane_current_command; passing -n would pin the name
+#     and switch automatic renaming off for that window.
+#
+# Claude panes are relaunched with --resume, added if the captured command lacks
+# it, so a pane always comes back as a resume rather than silently starting a new
+# conversation. Any explicit session id is dropped: the picker scoped to the
+# window's directory is right, a pinned id goes stale as soon as you start a new
+# conversation, and two windows here share one directory anyway.
+#
+# Every other program is NOT re-executed. The restore types it into the pane and
+# stops there, leaving it in the shell's line editor: press Enter to run it,
+# Ctrl-C or Ctrl-U to throw it away, or edit it first. Re-running an editor, a
+# REPL or a half-finished build unasked is a worse default than handing you the
+# command with your finger already on the trigger.
+#
+# Read-only with respect to tmux: it queries the server and writes one file.
+# Needs no root. Safe to call from a tmux hook on every layout change.
+#
+# Usage:
+#   tmux-snapshot [--out PATH] [--force] [--quiet] [--print] [--help]
+#
+#   --out PATH     write the restore script here (default below)
+#   --force        skip the debounce interval (for the manual keybinding)
+#   --quiet        say nothing unless something goes wrong (for hooks)
+#   --print        write nothing; dump the generated script to stdout
+#
+# Env fallbacks: TMUX_SNAPSHOT_OUT, XDG_STATE_HOME
+
+set -euo pipefail
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/tmux-snapshot"
+OUT="${TMUX_SNAPSHOT_OUT:-$STATE_DIR/restore-tmux-sessions.sh}"
+FORCE=""
+QUIET=""
+PRINT=""
+
+# Hooks fire in bursts — creating one session emits session-created plus a
+# window-linked — so a rewrite within this many seconds of the last one is
+# skipped. --force bypasses it for the manual binding.
+MIN_INTERVAL=2
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  --out)
+    OUT="${2:?--out needs a value}"
+    shift 2
+    ;;
+  --out=*)
+    OUT="${1#*=}"
+    shift
+    ;;
+  --force)
+    FORCE=1
+    shift
+    ;;
+  --quiet)
+    QUIET=1
+    shift
+    ;;
+  --print)
+    PRINT=1
+    shift
+    ;;
+  -h | --help)
+    sed -n '/^# Usage:/,/^# Env fallbacks/p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+  *)
+    printf '\033[0;31mtmux-snapshot: unknown argument: %s\033[0m\n' "$1" >&2
+    exit 1
+    ;;
+  esac
+done
+
+say() { [[ -n "$QUIET" ]] || printf '%s\n' "$*"; }
+die() {
+  printf '\033[0;31mtmux-snapshot: %s\033[0m\n' "$*" >&2
+  exit 1
+}
+
+command -v tmux >/dev/null 2>&1 || die "tmux not found on PATH"
+tmux has-session 2>/dev/null || {
+  say "no tmux server running — nothing to snapshot"
+  exit 0
+}
+
+# POSIX single-quote quoting. Used instead of printf %q because the generated
+# script feeds these strings to an interactive ZSH via send-keys, and %q can emit
+# bash-flavoured $'...' forms.
+shq() {
+  local s=${1//\'/\'\\\'\'}
+  printf "'%s'" "$s"
+}
+
+# Quote only when the argument actually needs it. Purely cosmetic, and worth it:
+# the generated file is meant to be read and copied from, and a command line
+# where every single token is quoted is markedly harder to scan.
+shq_min() {
+  if [[ "$1" =~ ^[A-Za-z0-9_@%+=:,./-]+$ ]]; then
+    printf '%s' "$1"
+  else
+    shq "$1"
+  fi
+}
+
+# Quote a whole command line for use as ONE argument in the generated script.
+# Prefers double quotes so an inner 'quoted arg' stays legible, but only when the
+# line has no character that double quotes would let the shell interpret.
+shq_line() {
+  if [[ "$1" != *['$`\"']* ]]; then
+    printf '"%s"' "$1"
+  else
+    shq "$1"
+  fi
+}
+
+# Foreground program of a pane, or empty when the pane is sitting at its shell.
+# $1 = pane_pid as reported by tmux. Prints argv one element per line.
+pane_foreground_argv() {
+  local pane_pid=$1 stat rest tpgid
+  [[ -r /proc/$pane_pid/stat ]] || return 0
+  stat=$(</proc/"$pane_pid"/stat)
+  # comm (field 2) is parenthesised and may itself contain spaces or ')', so the
+  # only safe split is after the LAST ')'. What remains starts at field 3, which
+  # puts tpgid — field 8 overall — at position 6.
+  rest=${stat##*) }
+  # shellcheck disable=SC2086
+  set -- $rest
+  tpgid=${6:-0}
+  [[ "$tpgid" =~ ^[0-9]+$ ]] || return 0
+  [[ "$tpgid" -gt 0 ]] || return 0
+  # tpgid == pane_pid means the shell itself is in the foreground: pane is idle.
+  [[ "$tpgid" -ne "$pane_pid" ]] || return 0
+  [[ -r /proc/$tpgid/cmdline ]] || return 0
+  tr '\0' '\n' < /proc/"$tpgid"/cmdline
+}
+
+# Rebuild a claude invocation so it resumes. Reads argv on stdin, prints one
+# shell-quoted command line.
+claude_resume_cmd() {
+  local -a argv=() out=()
+  local a i n tok next have_resume=""
+  while IFS= read -r a; do argv+=("$a"); done
+
+  i=0
+  n=${#argv[@]}
+  while [[ $i -lt $n ]]; do
+    tok=${argv[$i]}
+    case "$tok" in
+    --resume | -r)
+      have_resume=1
+      out+=("--resume")
+      # Drop an explicit session id, but only a bare one — the next token being
+      # another flag means --resume was already in its picker form.
+      next=${argv[$((i + 1))]:-}
+      [[ -n "$next" && "$next" != -* ]] && i=$((i + 1))
+      ;;
+    --resume=* | -r=*)
+      have_resume=1
+      out+=("--resume")
+      ;;
+    *)
+      out+=("$tok")
+      ;;
+    esac
+    i=$((i + 1))
+  done
+
+  [[ -n "$have_resume" ]] || out+=("--resume")
+
+  local line=""
+  for a in "${out[@]}"; do line+="${line:+ }$(shq_min "$a")"; done
+  printf '%s' "$line"
+}
+
+# ---------------------------------------------------------------------------
+# collect
+# ---------------------------------------------------------------------------
+PANES=$(tmux list-panes -a -F \
+  '#{session_name}	#{window_index}	#{pane_index}	#{pane_pid}	#{pane_dead}	#{pane_current_path}' 2>/dev/null) || true
+
+SESSION_COUNT=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -c . || true)
+PANE_COUNT=$(printf '%s\n' "$PANES" | grep -c . || true)
+WINDOW_COUNT=$(printf '%s\n' "$PANES" | awk -F'\t' 'NF {print $1 "\t" $2}' | sort -u | grep -c . || true)
+
+# Refuse to overwrite a good snapshot with an empty one. At shutdown every
+# session closes in turn and each close fires the hook; without this the last
+# write would replace a full layout with nothing.
+if [[ "${SESSION_COUNT:-0}" -eq 0 || -z "$PANES" ]]; then
+  say "no sessions visible — refusing to overwrite $OUT"
+  exit 0
+fi
+
+ATTACH_TO=$(tmux list-sessions -F '#{?session_attached,#{session_name},}' 2>/dev/null | grep -m1 . || true)
+[[ -n "$ATTACH_TO" ]] || ATTACH_TO=$(tmux list-sessions -F '#{session_name}' | head -1)
+
+# ---------------------------------------------------------------------------
+# generate
+# ---------------------------------------------------------------------------
+GEN=$(mktemp)
+trap 'rm -f "$GEN"' EXIT
+
+{
+  cat <<'GENHDR'
+#!/usr/bin/env bash
+# restore-tmux-sessions.sh — recreate the captured tmux layout.
+#
+# GENERATED by tmux-snapshot. Edits here are lost on the next capture; change
+# the generator instead. Regenerate now with:  tmux-snapshot --force
+#
+# Claude windows relaunch with --resume and land on the conversation picker,
+# scoped to that window's directory. Anything else that was running is typed
+# into its pane and left unsent — press Enter to run it, Ctrl-U to discard it.
+# It is never executed for you.
+#
+# Usage:
+#   restore-tmux-sessions.sh              # create, then attach
+#   restore-tmux-sessions.sh --no-attach  # create only
+#   restore-tmux-sessions.sh --dry-run    # print what it would do
+#
+# Safe to re-run: a session that already exists is left completely alone.
+GENHDR
+
+  # The Layout line is machine-readable on purpose: the shrink guard below
+  # reads it back out of an existing snapshot to decide whether a new capture
+  # would be a downgrade. Keep the trailing "N panes" shape if you edit it.
+  printf '#\n# Captured: %s on %s\n# Layout: %s sessions, %s windows, %s panes\n\n' \
+    "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$(hostname -s)" \
+    "$SESSION_COUNT" "$WINDOW_COUNT" "$PANE_COUNT"
+
+  cat <<'GENTOP'
+set -euo pipefail
+
+ATTACH=1
+DRY_RUN=0
+for arg in "$@"; do
+  case "$arg" in
+    --no-attach) ATTACH=0 ;;
+    --dry-run)   DRY_RUN=1; ATTACH=0 ;;
+    -h|--help)   sed -n '2,20p' "$0"; exit 0 ;;
+    *)           echo "unknown argument: $arg (try --help)" >&2; exit 2 ;;
+  esac
+done
+
+created=() skipped=()
+
+run() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '  would run: tmux'; printf ' %q' "$@"; printf '\n'
+  else
+    tmux "$@"
+  fi
+}
+
+# Keystrokes sent before the shell is ready are buffered by the pty and still
+# arrive, but waiting keeps the echoed command line from interleaving with zsh's
+# startup output.
+wait_for_shell() {
+  local target=$1 i
+  [ "$DRY_RUN" -eq 1 ] && return 0
+  for i in $(seq 1 50); do
+    case "$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null)" in
+      zsh|bash|sh) return 0 ;;
+    esac
+    sleep 0.1
+  done
+  return 0   # best effort — send anyway
+}
+
+# True while the session named $1 is being skipped because it already exists.
+SKIP=0
+
+new_sess() {
+  local s=$1 dir=$2
+  if tmux has-session -t "=$s" 2>/dev/null; then
+    echo "== $s — already exists, leaving untouched"
+    skipped+=("$s"); SKIP=1; return 0
+  fi
+  SKIP=0
+  echo "== $s"
+  [ -d "$dir" ] || echo "   !! $dir does not exist — window falls back to \$HOME"
+  echo "   window 1: $dir"
+  run new-session -d -s "$s" -c "$dir"
+  created+=("$s")
+}
+
+new_win() {
+  local s=$1 dir=$2
+  [ "$SKIP" -eq 1 ] && return 0
+  [ -d "$dir" ] || echo "   !! $dir does not exist — window falls back to \$HOME"
+  echo "   window +: $dir"
+  run new-window -d -t "=$s:" -c "$dir"
+}
+
+split() {
+  local target=$1 dir=$2
+  [ "$SKIP" -eq 1 ] && return 0
+  run split-window -d -t "$target" -c "$dir"
+}
+
+layout() {
+  local target=$1 lay=$2
+  [ "$SKIP" -eq 1 ] && return 0
+  run select-layout -t "$target" "$lay"
+}
+
+# Run a command in a pane.
+send_cmd() {
+  local target=$1 cmd=$2
+  [ "$SKIP" -eq 1 ] && return 0
+  echo "      -> $cmd"
+  wait_for_shell "$target"
+  run send-keys -t "$target" "$cmd" C-m
+}
+
+# Type what WAS running into the pane and stop, leaving it in the shell's line
+# editor: Enter runs it, Ctrl-U discards it, and it can be edited first. No
+# trailing C-m is the entire point of this function.
+#
+# -l sends the string literally. Without it tmux resolves each argument as a key
+# name first, so a command containing a bare `Enter`, `Space` or `C-c` would be
+# pressed rather than typed.
+send_note() {
+  local target=$1 cmd=$2
+  [ "$SKIP" -eq 1 ] && return 0
+  echo "      (typed, unsent — Enter to re-run: $cmd)"
+  wait_for_shell "$target"
+  run send-keys -t "$target" -l -- "$cmd"
+}
+
+finish() {
+  local s
+  for s in "${created[@]:-}"; do
+    [ -n "$s" ] && run select-window -t "=$s:1"
+  done
+  echo
+  [ "${#created[@]}" -gt 0 ] && echo "created: ${created[*]}"
+  [ "${#skipped[@]}" -gt 0 ] && echo "skipped (already existed): ${skipped[*]}"
+  [ "$DRY_RUN" -eq 1 ] && exit 0
+  echo
+  echo "Claude windows are on the --resume picker; pick the conversation per window."
+  echo "Other panes have their old command typed but unsent: Enter runs it, Ctrl-U clears it."
+  if [ "$ATTACH" -eq 1 ]; then
+    if [ -n "${TMUX:-}" ]; then
+      echo "Already inside tmux — not attaching. Switch with: tmux switch-client -t '$ATTACH_TO'"
+    elif tmux has-session -t "=$ATTACH_TO" 2>/dev/null; then
+      exec tmux attach-session -t "=$ATTACH_TO"
+    fi
+  fi
+  echo "Attach with: tmux attach -t '$ATTACH_TO'"
+}
+
+GENTOP
+
+  printf 'ATTACH_TO=%s\n\n' "$(shq "$ATTACH_TO")"
+
+  prev_session=""
+  prev_window=""
+  while IFS=$'\t' read -r sess win pane pid dead dir; do
+    [[ -z "$sess" ]] && continue
+
+    if [[ "$sess" != "$prev_session" ]]; then
+      printf 'new_sess %s %s\n' "$(shq "$sess")" "$(shq "$dir")"
+      prev_session="$sess"
+      prev_window="$win"
+    elif [[ "$win" != "$prev_window" ]]; then
+      printf 'new_win %s %s\n' "$(shq "$sess")" "$(shq "$dir")"
+      prev_window="$win"
+    else
+      # Additional pane inside the window we are already building.
+      printf 'split %s %s\n' "$(shq "=$sess:$win")" "$(shq "$dir")"
+    fi
+
+    target="=$sess:$win.$pane"
+
+    # A dead pane is kept on screen on purpose (remain-on-exit failed); it holds
+    # no running program, so it comes back as a plain shell.
+    if [[ "$dead" == "1" ]]; then
+      continue
+    fi
+
+    fg_argv=$(pane_foreground_argv "$pid" || true)
+    [[ -z "$fg_argv" ]] && continue
+
+    cmd0=$(printf '%s' "$fg_argv" | head -1)
+    case "${cmd0##*/}" in
+    claude)
+      line=$(printf '%s\n' "$fg_argv" | claude_resume_cmd)
+      printf 'send_cmd %s %s\n' "$(shq "$target")" "$(shq_line "$line")"
+      ;;
+    *)
+      # Quoted per element, exactly like the claude path above. This line gets
+      # typed into the pane ready for Enter, so it has to reproduce argv rather
+      # than merely describe it: flat-joining turns `bash -c 'sleep 300'` into
+      # four words and Enter would then run the wrong thing. shq_min leaves
+      # ordinary tokens bare, so it still reads like something you typed, and
+      # anything containing whitespace or a newline comes back single-quoted --
+      # which also keeps an embedded newline inside an open quote, where the
+      # shell treats it as a continuation instead of as a submit.
+      human=""
+      while IFS= read -r a; do human+="${human:+ }$(shq_min "$a")"; done <<<"$fg_argv"
+      printf 'send_note %s %s\n' "$(shq "$target")" "$(shq_line "$human")"
+      ;;
+    esac
+  done < <(printf '%s\n' "$PANES" | sort -t$'\t' -k1,1 -k2,2n -k3,3n)
+
+  # Restore multi-pane geometry. Emitted only where it matters.
+  while IFS=$'\t' read -r sess win npanes lay; do
+    [[ -z "$sess" ]] && continue
+    [[ "${npanes:-1}" -gt 1 ]] || continue
+    printf 'layout %s %s\n' "$(shq "=$sess:$win")" "$(shq "$lay")"
+  done < <(tmux list-windows -a -F '#{session_name}	#{window_index}	#{window_panes}	#{window_layout}')
+
+  printf '\nfinish\n'
+} > "$GEN"
+
+bash -n "$GEN" || die "generated script failed syntax check — not installing it"
+
+if [[ -n "$PRINT" ]]; then
+  cat "$GEN"
+  exit 0
+fi
+
+mkdir -p "$STATE_DIR" "$(dirname "$OUT")"
+
+# Serialise concurrent hook firings; a skipped tick is a non-event.
+exec 9>"$STATE_DIR/.lock"
+if ! flock -n 9; then
+  say "another snapshot is running — skipping"
+  exit 0
+fi
+
+if [[ -z "$FORCE" && -f "$OUT" ]]; then
+  age=$(( $(date +%s) - $(stat -c %Y "$OUT") ))
+  if [[ "$age" -lt "$MIN_INTERVAL" ]]; then
+    say "last snapshot was ${age}s ago — skipping (use --force to override)"
+    exit 0
+  fi
+fi
+
+# Never let an automatic capture SHRINK a snapshot taken before this boot.
+#
+# The empty-server guard above protects the shutdown direction. Startup is the
+# mirror image and was unprotected: after a reboot the pre-boot capture is the
+# only record of the layout to restore, yet the first `tmux` creates a bare
+# one-pane session, and to the hooks that is an ordinary layout change. It gets
+# written, demoting the good capture to .prev; the next rename or resize writes
+# again and .prev is gone too. The layout is then unrecoverable, and restore
+# has nothing left to rebuild from.
+#
+# Only automatic captures are held back. prefix C-s passes --force, and any
+# capture at least as large as the stored one still lands — so this releases
+# itself the moment a restore succeeds (or you decide the smaller layout is
+# the one you want). Snapshots written before the Layout line existed have no
+# count to compare and are simply not covered.
+if [[ -z "$FORCE" && -f "$OUT" ]]; then
+  stored_panes=$(sed -n 's/^# Layout: .*, \([0-9][0-9]*\) panes$/\1/p' "$OUT" | head -1)
+  boot_epoch=$(awk '/^btime /{print $2}' /proc/stat 2>/dev/null || echo 0)
+  if [[ -n "$stored_panes" && "$boot_epoch" -gt 0 ]] \
+     && [[ "$(stat -c %Y "$OUT")" -lt "$boot_epoch" ]] \
+     && [[ "$PANE_COUNT" -lt "$stored_panes" ]]; then
+    say "$OUT predates this boot and has $stored_panes panes; this capture has only $PANE_COUNT."
+    say "refusing to shrink it — run tmux-restore, or --force to overwrite deliberately."
+    exit 0
+  fi
+fi
+
+# Only write when something actually changed. This is what makes it safe to hang
+# the snapshot off chatty hooks like pane-focus-out: an unchanged layout costs a
+# comparison and nothing else, and — more importantly — .prev keeps holding the
+# last DIFFERENT layout instead of being churned into a copy of the current one,
+# which is the entire reason .prev exists.
+if [[ -f "$OUT" ]] && cmp -s <(sed '/^# Captured:/d' "$GEN") <(sed '/^# Captured:/d' "$OUT"); then
+  say "layout unchanged — $OUT left as is"
+  exit 0
+fi
+
+[[ -f "$OUT" ]] && cp -p "$OUT" "$OUT.prev"
+cp "$GEN" "$OUT"
+chmod 0700 "$OUT"   # personal state, and it is executable on purpose
+
+say "wrote $OUT ($SESSION_COUNT sessions, $WINDOW_COUNT windows, $PANE_COUNT panes)"
