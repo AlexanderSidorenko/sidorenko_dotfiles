@@ -62,19 +62,23 @@ else
 	row "serial" "$(sed -n 's/^Serial number: *//p' <<<"$key_info")"
 	row "firmware" "$(sed -n 's/^Firmware version: *//p' <<<"$key_info")"
 	if fido_info=$(ykman fido info 2>/dev/null); then
-		pin_state=$(sed -n 's/^PIN: *//p' <<<"$fido_info")
-		if [[ $pin_state == "Not set" ]]; then
+		# ykman's wording changed across versions: older builds print a
+		# "PIN: Not set" field, 5.2.x prints the prose "PIN is not set."
+		# Match both for the decision, and display whatever line ykman emitted
+		# so a future rewording still shows something sensible.
+		if grep -qiE 'PIN is not set|^PIN: *Not set' <<<"$fido_info"; then
 			row "fido2 pin" "$(bad "not set") — fingerprints cannot be enrolled"
 		else
-			row "fido2 pin" "$(ok "$pin_state")"
+			pin_state=$(grep -iE '^PIN' <<<"$fido_info" | head -n1)
+			row "fido2 pin" "$(ok "${pin_state:-set}")"
 		fi
 		# Deliberately read off "fido info" rather than "fingerprints list":
 		# the latter prompts for the PIN, which would hang a status command.
-		fp_state=$(sed -n 's/^Fingerprints: *//p' <<<"$fido_info")
-		if [[ $fp_state == "Not registered" ]]; then
+		if grep -qiE 'No fingerprints have been registered|^Fingerprints: *Not registered' <<<"$fido_info"; then
 			row "fingerprints" "$(bad "none enrolled") — run enroll-yubikey.sh"
 		else
-			row "fingerprints" "$(ok "$fp_state")"
+			fp_state=$(grep -iE 'ingerprint' <<<"$fido_info" | head -n1)
+			row "fingerprints" "$(ok "${fp_state:-registered}")"
 		fi
 	fi
 fi

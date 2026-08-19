@@ -110,7 +110,11 @@ sed 's/^/    /' <<<"$fido_info"
 
 # 1. PIN ---------------------------------------------------------------------
 step "FIDO2 PIN"
-if grep -q '^PIN: *Not set' <<<"$fido_info"; then
+# ykman's wording changed across versions: older builds print a "PIN: Not set"
+# field, ykman 5.2.x (Debian 12 / Ubuntu 24.04) prints the prose "PIN is not
+# set." Match both, or a set PIN is misread as "not set" — or worse, an unset
+# one as set, which sends enrolment on to a fingerprint step that then fails.
+if grep -qiE 'PIN is not set|^PIN: *Not set' <<<"$fido_info"; then
 	warn "no FIDO2 PIN is set; fingerprints cannot be enrolled without one."
 	info "This PIN is your fallback when a fingerprint is rejected three times,"
 	info "and it is NOT your login password. Store it in KeePassXC."
@@ -128,7 +132,7 @@ step "Fingerprints"
 # list" prompts for it. Only reach for the latter once we know there is
 # something to list, so the PIN prompt never arrives unexplained.
 list_fingerprints() {
-	if grep -q '^Fingerprints: *Not registered' <<<"$(ykman fido info)"; then
+	if grep -qiE 'No fingerprints have been registered|^Fingerprints: *Not registered' <<<"$(ykman fido info)"; then
 		return 1
 	fi
 	info "Listing fingerprints requires the FIDO2 PIN:"
