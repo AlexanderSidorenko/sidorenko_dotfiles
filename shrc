@@ -380,10 +380,6 @@ alias h='history'
 alias j='jobs -l'
 alias path='ppath'
 
-alias rm='rm -I'
-alias cp='cp -i'
-alias mv='mv -i'
-
 alias df='df -h'
 alias du='du -h'
 alias mkdir='mkdir -pv'
