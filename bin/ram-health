@@ -34,6 +34,11 @@
 
 set -euo pipefail
 
+# The /proc readers live in a library because bin/mem needs the same ones, and
+# every one of them encodes a unit or missing-key subtlety worth learning once.
+# shellcheck source-path=SCRIPTDIR
+source "$(dirname "${BASH_SOURCE[0]}")/lib/meminfo.sh"
+
 GREEN="$(printf '\033[0;32m')"
 YELLOW="$(printf '\033[0;33m')"
 RED="$(printf '\033[0;31m')"
@@ -78,58 +83,6 @@ hdr() { printf '\n%b%s%b\n' "$BOLD" "$1" "$RESET"; }
 row() { printf '  %-30s %s\n' "$1" "$2"; }
 note() { printf '  %b%s%b\n' "$DIM" "$1" "$RESET"; }
 
-# ---------- readers ----------
-
-# A field from /proc/meminfo, in kB. Missing keys yield 0 so arithmetic is safe.
-mi() { awk -v k="$1:" '$1 == k { print $2; found = 1 } END { if (!found) print 0 }' /proc/meminfo; }
-
-# A counter from /proc/vmstat.
-vm() { awk -v k="$1" '$1 == k { print $2; found = 1 } END { if (!found) print 0 }' /proc/vmstat; }
-
-# A PSI value, e.g. psi full avg60. /proc/pressure/memory lines look like:
-#   full avg10=0.00 avg60=2.08 avg300=5.66 total=98859245
-psi() {
-  awk -v row="$1" -v key="$2" '
-    $1 == row {
-      for (i = 2; i <= NF; i++) {
-        split($i, kv, "=")
-        if (kv[1] == key) { print kv[2]; found = 1 }
-      }
-    }
-    END { if (!found) print 0 }
-  ' /proc/pressure/memory
-}
-
-# A kernel cmdline parameter's value, e.g. `kcmdline zswap.compressor`. Empty
-# when the parameter was not passed at all.
-kcmdline() {
-  awk -v k="$1=" '
-    {
-      for (i = 1; i <= NF; i++)
-        if (index($i, k) == 1) { print substr($i, length(k) + 1); found = 1 }
-    }
-    END { if (!found) print "" }
-  ' /proc/cmdline
-}
-
-# Is a crypto algorithm registered right now? zswap can only use one that is.
-crypto_has() {
-  awk -v c="$1" '$1 == "name" && $3 == c { f = 1 } END { exit !f }' /proc/crypto
-}
-
-# Float comparison: succeeds when $1 >= $2.
-fge() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a >= b) }'; }
-
-# kB -> human. Kept separate from numfmt so the units match /proc conventions.
-hk() {
-  awk -v k="$1" 'BEGIN {
-    if (k >= 1048576) printf "%.1f GiB", k / 1048576
-    else if (k >= 1024) printf "%.0f MiB", k / 1024
-    else printf "%d KiB", k
-  }'
-}
-
-pct() { awk -v a="$1" -v b="$2" 'BEGIN { if (b > 0) printf "%.0f", a * 100 / b; else printf "0" }'; }
 
 # ---------- sample rates before anything else, since the verdict needs them ----------
 
@@ -161,17 +114,16 @@ some60="$(psi some avg60)"
 # though it were the intended setting. So compare want against have explicitly.
 warnings=()
 
-zswap_live_comp="$(cat /sys/module/zswap/parameters/compressor 2>/dev/null || true)"
-zswap_want_comp="$(kcmdline zswap.compressor)"
+zswap_live_comp="$(zswap_compressor_live)"
+zswap_want_comp="$(zswap_compressor_wanted)"
 comp_mismatch=""
-if [[ -n "$zswap_want_comp" && -n "$zswap_live_comp" &&
-  "$zswap_want_comp" != "$zswap_live_comp" ]]; then
+if zswap_compressor_mismatch; then
   comp_mismatch=1
   warnings+=("COMPRESSOR MISMATCH: cmdline asked for '${zswap_want_comp}', kernel is using '${zswap_live_comp}'")
 fi
 
 # Same class of silent failure, one level up: zswap itself requested but off.
-zswap_live_en="$(cat /sys/module/zswap/parameters/enabled 2>/dev/null || true)"
+zswap_live_en="$(zswap_param enabled)"
 if [[ "$(kcmdline zswap.enabled)" == "1" && "$zswap_live_en" != "Y" ]]; then
   warnings+=("zswap is requested on the cmdline but is NOT enabled (enabled=${zswap_live_en:-?})")
 fi
@@ -242,7 +194,7 @@ hdr "Swap tiers (highest priority is consumed first)"
 swapon --show 2>/dev/null | sed 's/^/  /' || note "no swap devices active"
 
 hdr "Compressed swap"
-zswap_on="$(cat /sys/module/zswap/parameters/enabled 2>/dev/null || echo '-')"
+zswap_on="$(zswap_param enabled)"
 if [[ "$zswap_on" == "Y" ]]; then
   row "zswap" "enabled"
   for p in /sys/module/zswap/parameters/*; do
