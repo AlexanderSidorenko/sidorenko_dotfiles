@@ -18,7 +18,8 @@ nvim/               — Neovim config (LazyVim-based, Lua)
 ranger/             — ranger file manager config
 claude/             — Claude Code config (settings.json, CLAUDE.md, skills/; symlinked into ~/.claude)
 bin/                — custom scripts (clip, mem, ram-health, ssh-host-setup.sh,
-                      zswap-setup.sh, neovide)
+                      zswap-setup.sh, neovide, tmux-snapshot, tmux-restore,
+                      tmux-pipe-log)
 bin/lib/            — sourced helpers, not executables (meminfo.sh)
 githooks/           — this repo's own git hooks (commit-msg enforces [job] prefix)
 ```
@@ -69,6 +70,25 @@ bash -n bin/mem && shellcheck -x bin/mem
 bash -n bin/ram-health && shellcheck -x bin/ram-health
 shellcheck bin/lib/meminfo.sh    # has a `shell=bash` directive, no shebang
 ```
+
+shellcheck is not currently in `nix-packages.sh`, so on a machine without it
+run the checks through Nix instead:
+
+```bash
+nix-shell -p shellcheck --run 'shellcheck bin/tmux-snapshot bin/tmux-pipe-log'
+```
+
+tmux behaviour is easy to get wrong from the man page alone; check it against a
+throwaway server rather than the live one, which shares its socket with the
+session you are working in:
+
+```bash
+tmux -L scratch -f /dev/null new-session -d -s t
+tmux -L scratch ... ; tmux -L scratch kill-server
+```
+
+To exercise a script that shells out to `tmux`, put a shim earlier on PATH that
+adds `-L scratch`, so a bug cannot reach the real sessions.
 
 ## Important notes
 

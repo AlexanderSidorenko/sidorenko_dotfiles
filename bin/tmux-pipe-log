@@ -1,0 +1,464 @@
+#!/usr/bin/env bash
+# tmux-pipe-log — log every pane's output to disk as it happens.
+#
+# WHY
+#
+# tmux keeps scrollback in the server's memory and nowhere else. Nothing is
+# written out, not even at kill-server, so a panic or a power cut takes every
+# pane's history with it and there is nothing to read afterwards. tmux-snapshot
+# captures the layout and (with --contents) a point-in-time dump of what was on
+# screen; this is the other half — a continuous record, so what is lost to an
+# unplanned reboot is only what had not been flushed yet.
+#
+# It is tmux's own pipe-pane doing the work: tmux forks `cat >> file` per pane
+# and copies the pty's output stream into it as the program produces it. Three
+# things about that stream matter here:
+#
+#   - It is RAW. Prompt repaints, OSC title sets and zsh-syntax-highlighting
+#     recolouring every keystroke all land in the file verbatim. Nothing is
+#     stripped on write, because a logger has to be cheap and lossless; --cat
+#     cleans it up on the way out instead.
+#   - Full-screen programs are ruinous. A pane running claude or nvim redraws
+#     continuously, and its raw stream runs to hundreds of MB an hour, which
+#     would bury the shell output this exists to keep. So panes running one are
+#     not logged (SKIP_RE), and because automatic-rename-format interpolates
+#     pane_current_command, window-renamed fires when a pane's command changes
+#     and --all re-evaluates: the pipe stops when nvim starts and resumes when
+#     it exits. Nothing is lost by that — an editor's redraws are not output,
+#     and a claude conversation is already persisted by claude itself.
+#   - `pipe-pane -o` is a TOGGLE, not "start if not started". Calling it twice
+#     stops the pipe. --all therefore tests #{pane_pipe} and only ever pipes a
+#     pane that is not already piped, which is what makes it safe on a hook.
+#
+# Logs are grouped per tmux SERVER run, in a directory named for when that
+# server started. The server is the lifetime that matters: pane ids restart at
+# %0 when it does, so sharing one directory across two runs would append a new
+# pane's output onto an old pane's file. It also puts the answer to "what was I
+# running before the reboot" in its own dated directory — that is --prev.
+#
+# Usage:
+#   tmux-pipe-log [--all] [--quiet]     start logging every eligible pane
+#   tmux-pipe-log --toggle [TARGET]     start/stop logging one pane, and pin it
+#                                       there with the @pipe-log pane option
+#   tmux-pipe-log --auto [TARGET]       drop the pin, back to the automatic rules
+#   tmux-pipe-log --stop-all            stop and pin off everywhere
+#   tmux-pipe-log --list [--prev]       show the logs and their sizes
+#   tmux-pipe-log --cat NAME [--prev] [--raw]   print one log, escapes stripped
+#   tmux-pipe-log --dir [--prev]        print the log directory and exit
+#   tmux-pipe-log --prune               drop log directories past KEEP_DAYS
+#
+#   NAME is a pane id (%12), a bare index (12), a file name (pane-12.log) or a
+#   target as --list shows it (0-dotfiles:1.1).
+#
+# Env: TMUX_PIPE_LOG_DIR, TMUX_PIPE_LOG_SKIP, TMUX_PIPE_LOG_MAX_BYTES,
+#      TMUX_PIPE_LOG_KEEP_DAYS, XDG_STATE_HOME
+
+set -euo pipefail
+umask 077 # These logs are transcripts; nothing here is for other users.
+
+STATE_DIR="${TMUX_PIPE_LOG_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/tmux-log}"
+
+# Panes running one of these are not logged; see the WHY above. This is the
+# second of two tests -- #{alternate_on} is the first -- and exists for the
+# programs that redraw without ever switching to the alternate screen, claude
+# being the one that matters here.
+SKIP_RE="${TMUX_PIPE_LOG_SKIP:-^(claude|codex|nvim|vim|vi|hx|emacs|htop|btop|top|atop|watch)$}"
+
+# Per-file cap, checked when a pipe is opened. One rotation is kept.
+MAX_BYTES="${TMUX_PIPE_LOG_MAX_BYTES:-$((32 * 1024 * 1024))}"
+
+# Log directories older than this are pruned, except the newest two.
+KEEP_DAYS="${TMUX_PIPE_LOG_KEEP_DAYS:-14}"
+
+ACTION="all"
+TARGET=""
+PREV=""
+RAW=""
+QUIET=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  --all) ACTION="all"; shift ;;
+  --toggle)
+    ACTION="toggle"
+    shift
+    [[ $# -gt 0 && "$1" != -* ]] && { TARGET="$1"; shift; }
+    ;;
+  --stop-all) ACTION="stop-all"; shift ;;
+  --auto)
+    ACTION="auto"
+    shift
+    [[ $# -gt 0 && "$1" != -* ]] && { TARGET="$1"; shift; }
+    ;;
+  --list) ACTION="list"; shift ;;
+  --cat)
+    ACTION="cat"
+    TARGET="${2:?--cat needs a log name}"
+    shift 2
+    ;;
+  --dir) ACTION="dir"; shift ;;
+  --prune) ACTION="prune"; shift ;;
+  --prev) PREV=1; shift ;;
+  --raw) RAW=1; shift ;;
+  --quiet) QUIET=1; shift ;;
+  -h | --help)
+    # Terminate on the blank line, not on "# Env:", so the continuation line
+    # listing the rest of the variables is printed too.
+    sed -n '/^# Usage:/,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+  *)
+    printf '\033[0;31mtmux-pipe-log: unknown argument: %s\033[0m\n' "$1" >&2
+    exit 1
+    ;;
+  esac
+done
+
+say() { [[ -n "$QUIET" ]] || printf '%s\n' "$*"; }
+die() {
+  printf '\033[0;31mtmux-pipe-log: %s\033[0m\n' "$*" >&2
+  exit 1
+}
+
+command -v tmux >/dev/null 2>&1 || die "tmux not found on PATH"
+
+# Epoch second the running tmux server started, from /proc: boot time plus the
+# server's own starttime (field 22 of /proc/<pid>/stat) converted from clock
+# ticks. Same /proc-anchored approach tmux-snapshot uses, and Linux-only for the
+# same reason; elsewhere the directory falls back to the server pid.
+server_start_epoch() {
+  local pid btime st ticks hz
+  pid=$(tmux display-message -p '#{pid}' 2>/dev/null) || return 1
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  btime=$(awk '/^btime /{print $2}' /proc/stat 2>/dev/null) || return 1
+  [[ -n "$btime" && -r /proc/$pid/stat ]] || return 1
+  st=$(</proc/"$pid"/stat)
+  # comm (field 2) is parenthesised and may contain ')', so split after the LAST
+  # one. What remains starts at field 3, putting starttime — field 22 — at 20.
+  st=${st##*) }
+  # shellcheck disable=SC2086
+  set -- $st
+  ticks=${20:-}
+  [[ "$ticks" =~ ^[0-9]+$ ]] || return 1
+  hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
+  printf '%s' "$((btime + ticks / hz))"
+}
+
+# Directory for the CURRENT server run, created on demand.
+current_dir() {
+  local epoch stamp
+  if epoch=$(server_start_epoch 2>/dev/null) && [[ -n "$epoch" ]]; then
+    stamp=$(date -d "@$epoch" '+%Y-%m-%dT%H%M%S' 2>/dev/null || printf 'epoch-%s' "$epoch")
+  else
+    stamp="server-$(tmux display-message -p '#{pid}' 2>/dev/null || echo unknown)"
+  fi
+  printf '%s/%s' "$STATE_DIR" "$stamp"
+}
+
+# Newest ($1 = 0, the default) or next-newest ($1 = 1) EXISTING log directory.
+nth_dir() {
+  find "$STATE_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null |
+    sort -r | sed -n "$((${1:-0} + 1))p"
+}
+
+# Directory the read-only actions look at.
+read_dir() {
+  if [[ -n "$PREV" ]]; then
+    nth_dir 1
+  else
+    nth_dir 0
+  fi
+}
+
+index_file() { printf '%s/index.tsv' "$1"; }
+
+# ---------------------------------------------------------------------------
+# writing
+# ---------------------------------------------------------------------------
+
+log_file() { printf '%s/pane-%s.log' "$1" "${2#%}"; }
+
+# Rotate a log that has grown past the cap, keeping exactly one generation.
+rotate_if_big() {
+  local f=$1 size
+  [[ -f "$f" ]] || return 0
+  size=$(stat -c %s "$f" 2>/dev/null || echo 0)
+  [[ "$size" -ge "$MAX_BYTES" ]] || return 0
+  mv -f "$f" "$f.1"
+}
+
+# Start logging one pane. $1 = pane id (%12), $2 = log directory.
+start_pipe() {
+  local id=$1 dir=$2 file
+  file=$(log_file "$dir" "$id")
+  rotate_if_big "$file"
+  # Create it here rather than letting the redirection do it: the pipe runs
+  # under the tmux SERVER's umask, not this script's, and a log holding every
+  # keystroke and every token ever printed has no business being world-readable.
+  [[ -e "$file" ]] || : > "$file"
+  chmod 0600 "$file"
+  # exec so the pipe is `cat` itself rather than a shell holding a child, and
+  # the path is single-quoted for the sh tmux runs it under.
+  tmux pipe-pane -t "$id" "exec cat >> '$file'"
+}
+
+stop_pipe() { tmux pipe-pane -t "$1"; }
+
+# True when a pane that IS piped should be re-piped: its log has gone (pruned,
+# or cleaned up by hand) or has outgrown the cap.
+needs_reopen() {
+  local dir=$1 id=$2 file size
+  file=$(log_file "$dir" "$id")
+  [[ -f "$file" ]] || return 0
+  size=$(stat -c %s "$file" 2>/dev/null || echo 0)
+  [[ "$size" -ge "$MAX_BYTES" ]]
+}
+
+# Rewrite index.tsv: every live pane's current target and directory, merged over
+# what is already there so panes that have since closed keep their entry. It is
+# the only thing that says which pane-N.log was which window once the server is
+# gone.
+write_index() {
+  local dir=$1 idx tmp id target cwd
+  idx=$(index_file "$dir")
+  declare -A seen=()
+  if [[ -f "$idx" ]]; then
+    while IFS=$'\t' read -r id target cwd; do
+      [[ -n "$id" ]] && seen["$id"]=$'\t'"$target"$'\t'"$cwd"
+    done < "$idx"
+  fi
+  while IFS=$'\t' read -r id target cwd; do
+    [[ -n "$id" ]] && seen["$id"]=$'\t'"$target"$'\t'"$cwd"
+  done < <(tmux list-panes -a -F '#{pane_id}	#{session_name}:#{window_index}.#{pane_index}	#{pane_current_path}')
+
+  tmp=$(mktemp "$dir/.index.XXXXXX")
+  for id in "${!seen[@]}"; do
+    printf '%s%s\n' "$id" "${seen[$id]}"
+  done | sort -V > "$tmp"
+  mv -f "$tmp" "$idx"
+}
+
+# Bring every pane into the state it should be in: piped if it is at a shell,
+# not piped if it is running something full-screen. Safe to call from a hook and
+# safe to call repeatedly — it only ever acts on panes that disagree.
+#
+# The pane option @pipe-log overrides both tests, which is what makes --toggle
+# stick: without it, turning logging on for a pane running nvim would last only
+# until the next hook fired and swept it straight back off. A pane option is the
+# right place for that state because it dies with the pane, exactly like the
+# decision it records.
+sync_all() {
+  local dir id piped cmd alt want started=0 stopped=0 reopened=0
+  dir=$(current_dir)
+  mkdir -p "$dir"
+  chmod 0700 "$dir"
+
+  while IFS=$'\t' read -r id piped cmd alt want; do
+    [[ -n "$id" ]] || continue
+    if [[ "$want" == "off" ]] ||
+      { [[ "$want" != "on" ]] && [[ "$alt" == "1" || "${cmd##*/}" =~ $SKIP_RE ]]; }; then
+      if [[ "$piped" == "1" ]]; then
+        stop_pipe "$id"
+        stopped=$((stopped + 1))
+      fi
+    elif [[ "$piped" != "1" ]]; then
+      start_pipe "$id" "$dir"
+      started=$((started + 1))
+    elif needs_reopen "$dir" "$id"; then
+      # An open pipe holds its own fd, so it neither notices the file being
+      # rotated out from under it nor stops when the file is deleted -- it just
+      # keeps filling an inode with no name. Restarting it is what makes
+      # MAX_BYTES an actual cap rather than something only checked on the way in.
+      stop_pipe "$id"
+      start_pipe "$id" "$dir"
+      reopened=$((reopened + 1))
+    fi
+  done < <(tmux list-panes -a -F '#{pane_id}	#{pane_pipe}	#{pane_current_command}	#{alternate_on}	#{@pipe-log}')
+
+  write_index "$dir"
+  say "logging to $dir (started $started, stopped $stopped, reopened $reopened)"
+}
+
+toggle_one() {
+  local target=${1:-} id piped dir
+  [[ -n "$target" ]] || target=$(tmux display-message -p '#{pane_id}')
+  id=$(tmux display-message -p -t "$target" '#{pane_id}') || die "no such pane: $target"
+  piped=$(tmux display-message -p -t "$id" '#{pane_pipe}')
+  if [[ "$piped" == "1" ]]; then
+    stop_pipe "$id"
+    tmux set-option -p -t "$id" @pipe-log off
+    say "logging OFF for $id"
+    # The binding runs this with run-shell -b, which throws stdout away, so the
+    # answer has to go back through tmux to be seen at all.
+    tmux display-message -t "$id" "pane logging OFF"
+  else
+    dir=$(current_dir)
+    mkdir -p "$dir"
+    start_pipe "$id" "$dir"
+    tmux set-option -p -t "$id" @pipe-log on
+    write_index "$dir"
+    say "logging ON for $id -> $(log_file "$dir" "$id")"
+    tmux display-message -t "$id" "pane logging ON -> pane-${id#%}.log"
+  fi
+}
+
+# Stop everywhere AND pin it, because a bare stop would last until the next hook
+# fired and swept the panes back on. --auto is the way back.
+stop_all() {
+  local id piped n=0
+  while IFS=$'\t' read -r id piped; do
+    [[ -n "$id" ]] || continue
+    [[ "$piped" == "1" ]] && stop_pipe "$id"
+    tmux set-option -p -t "$id" @pipe-log off
+    n=$((n + 1))
+  done < <(tmux list-panes -a -F '#{pane_id}	#{pane_pipe}')
+  say "logging pinned off in $n panes (tmux-pipe-log --auto to undo)"
+}
+
+# Drop the @pipe-log pin, handing the pane back to the automatic rules.
+auto_pane() {
+  local target=${1:-} id n=0
+  if [[ -n "$target" ]]; then
+    id=$(tmux display-message -p -t "$target" '#{pane_id}') || die "no such pane: $target"
+    tmux set-option -p -t "$id" -u @pipe-log
+    say "$id back on the automatic rules"
+  else
+    while IFS= read -r id; do
+      [[ -n "$id" ]] || continue
+      tmux set-option -p -t "$id" -u @pipe-log
+      n=$((n + 1))
+    done < <(tmux list-panes -a -F '#{pane_id}')
+    say "$n panes back on the automatic rules"
+  fi
+  sync_all
+}
+
+# Drop old runs, always keeping the newest two — the current one and the one
+# holding whatever was running before the last reboot.
+prune() {
+  local keep1 keep2 d n=0
+  [[ -d "$STATE_DIR" ]] || return 0
+  keep1=$(nth_dir 0)
+  keep2=$(nth_dir 1)
+  while IFS= read -r d; do
+    [[ -n "$d" ]] || continue
+    [[ "$d" == "$keep1" || "$d" == "$keep2" ]] && continue
+    rm -rf "$d"
+    n=$((n + 1))
+  done < <(find "$STATE_DIR" -mindepth 1 -maxdepth 1 -type d -mtime +"$KEEP_DAYS" 2>/dev/null)
+  [[ "$n" -gt 0 ]] && say "pruned $n old log director$([[ $n -eq 1 ]] && echo y || echo ies)"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# reading
+# ---------------------------------------------------------------------------
+
+# Strip what a terminal would have consumed rather than shown: OSC strings (the
+# title sets), CSI sequences (colour, cursor moves, erases), charset selects and
+# the single-character escapes. Then collapse carriage-return overwrites to the
+# final state of the line, which is what makes a repainted prompt or a progress
+# bar readable.
+#
+# LC_ALL=C is load-bearing twice over. The final-byte class [@-~] is a RANGE, and
+# under a UTF-8 locale glibc resolves ranges by collation, where it quietly
+# matches nothing at all and every escape survives; under C it is the byte range
+# it looks like. A raw pty stream is also not guaranteed to be valid UTF-8, and
+# sed refuses to work on input it cannot decode. ESC is spliced in literally for
+# the same reason the ranges are byte ranges -- no dependence on GNU's \x1b.
+clean() {
+  local E=$'\033' A=$'\a'
+  LC_ALL=C sed -E \
+    -e "s#${E}\\][^${E}${A}]*(${A}|${E}\\\\)##g" \
+    -e "s#${E}\\[[0-9;?]*[ -/]*[@-~]##g" \
+    -e "s#${E}[()][A-B0-9]##g" \
+    -e "s#${E}[=>78NOMc]##g" \
+    -e $'s#\r$##' \
+    -e $'s#.*\r##'
+}
+
+list_logs() {
+  local dir idx id target cwd f size
+  dir=$(read_dir)
+  [[ -n "$dir" && -d "$dir" ]] || die "no logs yet${PREV:+ (nothing before the current run)}"
+  idx=$(index_file "$dir")
+  printf '\033[2m%s\033[0m\n\n' "$dir"
+  printf '%-10s  %-24s  %8s  %s\n' "LOG" "PANE" "SIZE" "DIRECTORY"
+  while IFS=$'\t' read -r id target cwd; do
+    f="$dir/pane-${id#%}.log"
+    [[ -f "$f" ]] || continue
+    size=$(du -h "$f" | cut -f1)
+    printf '%-10s  %-24s  %8s  %s\n' "pane-${id#%}" "$target" "$size" "${cwd/#$HOME/\~}"
+  done < <([[ -f "$idx" ]] && cat "$idx" || true)
+  printf '\n\033[2mread one with:  tmux-pipe-log --cat pane-N%s\033[0m\n' "${PREV:+ --prev}"
+}
+
+# Resolve NAME to a log file inside $1. Accepts %12, 12, pane-12, pane-12.log,
+# and a target as --list prints it.
+resolve_log() {
+  local dir=$1 name=$2 idx id target cwd
+  case "$name" in
+  pane-*.log) [[ -f "$dir/$name" ]] && { printf '%s/%s' "$dir" "$name"; return 0; } ;;
+  pane-*) [[ -f "$dir/$name.log" ]] && { printf '%s/%s.log' "$dir" "$name"; return 0; } ;;
+  %[0-9]* | [0-9]*)
+    [[ -f "$dir/pane-${name#%}.log" ]] && { printf '%s/pane-%s.log' "$dir" "${name#%}"; return 0; }
+    ;;
+  esac
+  idx=$(index_file "$dir")
+  [[ -f "$idx" ]] || return 1
+  while IFS=$'\t' read -r id target cwd; do
+    if [[ "$target" == "$name" ]]; then
+      [[ -f "$dir/pane-${id#%}.log" ]] && { printf '%s/pane-%s.log' "$dir" "${id#%}"; return 0; }
+    fi
+  done < "$idx"
+  return 1
+}
+
+cat_log() {
+  local dir f
+  dir=$(read_dir)
+  [[ -n "$dir" && -d "$dir" ]] || die "no logs yet${PREV:+ (nothing before the current run)}"
+  f=$(resolve_log "$dir" "$TARGET") || die "no log matching '$TARGET' in $dir (try --list)"
+  # The rotated generation first, so the output reads in chronological order.
+  if [[ -n "$RAW" ]]; then
+    [[ -f "$f.1" ]] && cat "$f.1"
+    cat "$f"
+  else
+    { [[ -f "$f.1" ]] && cat "$f.1"; cat "$f"; } | clean
+  fi
+}
+
+# ---------------------------------------------------------------------------
+case "$ACTION" in
+dir)
+  d=$(read_dir)
+  [[ -n "$d" ]] || die "no logs yet"
+  printf '%s\n' "$d"
+  ;;
+list) list_logs ;;
+cat) cat_log ;;
+prune) prune ;;
+*)
+  tmux has-session 2>/dev/null || {
+    say "no tmux server running — nothing to log"
+    exit 0
+  }
+  mkdir -p "$STATE_DIR"
+  # Serialise concurrent hook firings; a skipped tick is a non-event, since the
+  # next hook re-syncs anyway.
+  exec 9>"$STATE_DIR/.lock"
+  if ! flock -n 9; then
+    say "another run is syncing — skipping"
+    exit 0
+  fi
+  case "$ACTION" in
+  all)
+    sync_all
+    prune
+    ;;
+  toggle) toggle_one "$TARGET" ;;
+  stop-all) stop_all ;;
+  auto) auto_pane "$TARGET" ;;
+  esac
+  ;;
+esac
