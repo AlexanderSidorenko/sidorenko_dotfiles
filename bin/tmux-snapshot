@@ -40,16 +40,32 @@
 # REPL or a half-finished build unasked is a worse default than handing you the
 # command with your finger already on the trigger.
 #
+# The layout is only half of what a reboot destroys. --contents also dumps each
+# pane's scrollback next to the restore script, so the output you were reading
+# when the machine went down is still there afterwards. It is NOT replayed into
+# the restored pane: tmux-resurrect does that by launching the pane as
+# `cat <file>; exec $SHELL`, which produces a pane whose scrollback is a lie --
+# old output sitting above a fresh prompt that never produced it. Plain files
+# are lossless, greppable, and honest about what they are.
+#
+# That capture is point-in-time, so it is bounded by when it last ran: --force
+# (prefix C-s) always takes one, and the hook path takes one at most every
+# CONTENTS_MIN_INTERVAL. What survives an unplanned reboot with nothing lost at
+# all is tmux-pipe-log, which streams pane output to disk as it is produced.
+#
 # Read-only with respect to tmux: it queries the server and writes one file.
 # Needs no root. Safe to call from a tmux hook on every layout change.
 #
 # Usage:
-#   tmux-snapshot [--out PATH] [--force] [--quiet] [--print] [--help]
+#   tmux-snapshot [--out PATH] [--force] [--quiet] [--print]
+#                 [--contents|--no-contents] [--help]
 #
 #   --out PATH     write the restore script here (default below)
-#   --force        skip the debounce interval (for the manual keybinding)
+#   --force        skip the debounce interval, and capture contents (prefix C-s)
 #   --quiet        say nothing unless something goes wrong (for hooks)
 #   --print        write nothing; dump the generated script to stdout
+#   --contents     dump every pane's scrollback too, whatever the interval says
+#   --no-contents  never dump scrollback, even with --force
 #
 # Env fallbacks: TMUX_SNAPSHOT_OUT, XDG_STATE_HOME
 
@@ -57,14 +73,22 @@ set -euo pipefail
 
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/tmux-snapshot"
 OUT="${TMUX_SNAPSHOT_OUT:-$STATE_DIR/restore-tmux-sessions.sh}"
+CONTENTS_DIR="$STATE_DIR/contents"
 FORCE=""
 QUIET=""
 PRINT=""
+CONTENTS=""
+NO_CONTENTS=""
 
 # Hooks fire in bursts — creating one session emits session-created plus a
 # window-linked — so a rewrite within this many seconds of the last one is
 # skipped. --force bypasses it for the manual binding.
 MIN_INTERVAL=2
+
+# Scrollback is captured on its own, much slower clock. The layout hooks fire on
+# every command you run; dumping every pane's history that often would be pure
+# churn, and tmux-pipe-log already covers the gap between two dumps.
+CONTENTS_MIN_INTERVAL=300
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -88,8 +112,20 @@ while [[ $# -gt 0 ]]; do
     PRINT=1
     shift
     ;;
+  --contents)
+    CONTENTS=1
+    shift
+    ;;
+  --no-contents)
+    NO_CONTENTS=1
+    shift
+    ;;
   -h | --help)
-    sed -n '/^# Usage:/,/^# Env fallbacks/p' "$0" | sed 's/^# \{0,1\}//'
+    # Stop at the first block: the generated script embedded below has its own
+    # "# Usage:" line, which would otherwise open a second range that runs to
+    # the end of the file.
+    sed -n '/^# Usage:/,/^# Env fallbacks/{p;/^# Env fallbacks/q}' "$0" |
+      sed 's/^# \{0,1\}//'
     exit 0
     ;;
   *)
@@ -198,6 +234,72 @@ claude_resume_cmd() {
   local line=""
   for a in "${out[@]}"; do line+="${line:+ }$(shq_min "$a")"; done
   printf '%s' "$line"
+}
+
+# Dump every pane's scrollback into a fresh directory, then swap it in, keeping
+# one previous generation the way the restore script does. Building in a temp
+# directory and renaming means a capture interrupted half way leaves the old one
+# intact rather than a directory holding half of each.
+capture_contents() {
+  local tmpdir sess win pane cmd dir dead target txt file n=0
+  mkdir -p "$STATE_DIR"
+  tmpdir=$(mktemp -d "$STATE_DIR/.contents.XXXXXX") || return 1
+
+  while IFS=$'\t' read -r sess win pane cmd dir dead; do
+    [[ -z "$sess" ]] && continue
+    target="=$sess:$win.$pane"
+    # -J unwraps what the terminal hard-broke at the pane width, so a long line
+    # comes back greppable as one line; -S - takes the whole scrollback, which
+    # history-limit already bounds. No -e: colour escapes would make grep and
+    # diff useless on these files, and the rendered text is the payload.
+    #
+    # A pane inside a full-screen program yields its scrollback minus the final
+    # screenful (that screen is swapped out, and never entered the history)
+    # plus whatever the program is currently showing. A DEAD pane captures
+    # fine, and is worth having: remain-on-exit keeps panes whose command was
+    # killed, and their last screen is the evidence of how.
+    txt=$(tmux capture-pane -pJ -S - -t "$target" 2>/dev/null) || continue
+    [[ -n "${txt//[[:space:]]/}" ]] || continue
+
+    file="$tmpdir/$(printf '%s' "$sess" | tr -c 'A-Za-z0-9_.-' '_')@$win.$pane.txt"
+    {
+      printf '# pane:     %s:%s.%s%s\n' "$sess" "$win" "$pane" \
+        "$([[ "$dead" == "1" ]] && printf ' (dead)')"
+      printf '# dir:      %s\n' "$dir"
+      printf '# command:  %s\n' "$cmd"
+      printf '# captured: %s (%s lines)\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "$(printf '%s\n' "$txt" | wc -l)"
+      printf -- '# ---\n'
+      printf '%s\n' "$txt"
+    } > "$file"
+    # Anything a terminal ever showed can be in here, keys and tokens included.
+    chmod 0600 "$file"
+    n=$((n + 1))
+  done < <(tmux list-panes -a -F \
+    '#{session_name}	#{window_index}	#{pane_index}	#{pane_current_command}	#{pane_current_path}	#{pane_dead}' |
+    sort -t$'\t' -k1,1 -k2,2n -k3,3n)
+
+  if [[ "$n" -eq 0 ]]; then
+    rm -rf "$tmpdir"
+    return 0
+  fi
+
+  touch "$tmpdir/.captured"
+  rm -rf "$CONTENTS_DIR.prev"
+  [[ -d "$CONTENTS_DIR" ]] && mv "$CONTENTS_DIR" "$CONTENTS_DIR.prev"
+  mv "$tmpdir" "$CONTENTS_DIR"
+  chmod 0700 "$CONTENTS_DIR"
+  say "captured scrollback from $n panes into $CONTENTS_DIR"
+}
+
+# --contents and --force always capture; the hook path only once the contents
+# clock has run out. --no-contents and --print never do.
+want_contents() {
+  [[ -n "$NO_CONTENTS" || -n "$PRINT" ]] && return 1
+  [[ -n "$CONTENTS" || -n "$FORCE" ]] && return 0
+  local stamp="$CONTENTS_DIR/.captured"
+  [[ -f "$stamp" ]] || return 0
+  [[ $(($(date +%s) - $(stat -c %Y "$stamp"))) -ge "$CONTENTS_MIN_INTERVAL" ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -367,6 +469,9 @@ finish() {
   echo
   echo "Claude windows are on the --resume picker; pick the conversation per window."
   echo "Other panes have their old command typed but unsent: Enter runs it, Ctrl-U clears it."
+  if [ -d "$CONTENTS_DIR" ]; then
+    echo "Scrollback captured before the reboot: $CONTENTS_DIR"
+  fi
   if [ "$ATTACH" -eq 1 ]; then
     if [ -n "${TMUX:-}" ]; then
       echo "Already inside tmux — not attaching. Switch with: tmux switch-client -t '$ATTACH_TO'"
@@ -379,7 +484,8 @@ finish() {
 
 GENTOP
 
-  printf 'ATTACH_TO=%s\n\n' "$(shq "$ATTACH_TO")"
+  printf 'ATTACH_TO=%s\n' "$(shq "$ATTACH_TO")"
+  printf 'CONTENTS_DIR=%s\n\n' "$(shq "$CONTENTS_DIR")"
 
   prev_session=""
   prev_window=""
@@ -490,6 +596,15 @@ if [[ -z "$FORCE" && -f "$OUT" ]]; then
     say "refusing to shrink it — run tmux-restore, or --force to overwrite deliberately."
     exit 0
   fi
+fi
+
+# Scrollback goes here, deliberately BEFORE the unchanged-layout exit below:
+# what is on screen changes constantly while the layout does not, so gating the
+# dump on a layout change would mean almost never taking one. It sits after the
+# guards above on purpose, so a post-boot capture that is refused as a shrink
+# does not get to overwrite the pre-boot scrollback either.
+if want_contents; then
+  capture_contents || say "scrollback capture failed — layout snapshot continues"
 fi
 
 # Only write when something actually changed. This is what makes it safe to hang
