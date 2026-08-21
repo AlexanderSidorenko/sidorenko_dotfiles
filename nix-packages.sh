@@ -82,6 +82,43 @@ if [[ "$(uname)" == "Linux" ]] && declare -f has_gui >/dev/null 2>&1 && has_gui;
   )
 fi
 
+# Tools that are NOT in nixpkgs and are built from a derivation kept in this
+# repo instead. Each entry is a .nix file at the repo root that evaluates to a
+# single derivation, installed by name with `nix-env -f <file> -i <name>`.
+# Keeping them here rather than in a separate install step means nix_reinstall,
+# which wipes the profile with `nix-env -e '*'`, puts them back too.
+NIX_LOCAL_DERIVATIONS=(
+  "gitpane.nix gitpane"
+)
+
+# Repo root, whichever way this file was reached: install.sh exports DOTDIR,
+# the shell config exports SIDORENKO_DOTFILES, and the default covers neither.
+nix_dotdir() {
+  printf '%s' "${DOTDIR:-${SIDORENKO_DOTFILES:-$HOME/.sidorenko_dotfiles}}"
+}
+
+# Build and install every entry in NIX_LOCAL_DERIVATIONS. Slower than nix-env
+# -iA against the channel, because the source is fetched and compiled locally --
+# a few minutes on a cold store, nothing on a warm one.
+nix_install_local() {
+  local dotdir entry file attr output
+  dotdir="$(nix_dotdir)"
+
+  for entry in "${NIX_LOCAL_DERIVATIONS[@]}"; do
+    file="${entry%% *}"
+    attr="${entry##* }"
+    if [[ ! -r "$dotdir/$file" ]]; then
+      echo "nix_install_local: missing $dotdir/$file — skipping $attr" >&2
+      continue
+    fi
+    echo "Building $attr from $file (this can take a few minutes)..."
+    if ! output="$(nix-env -f "$dotdir/$file" -i "$attr" 2>&1)"; then
+      printf '%s\n' "$output" >&2
+      echo "nix_install_local: $attr failed — continuing" >&2
+    fi
+  done
+}
+
 # Install/upgrade every package in NIX_PACKAGES via nix-env -iA.
 # Idempotent: re-running upgrades existing installs and adds missing ones.
 nix_install() {
@@ -102,6 +139,8 @@ nix_install() {
     printf '%s\n' "$output" >&2
     return 1
   fi
+
+  nix_install_local
 }
 
 # Wipe every nix-env package, then reinstall from NIX_PACKAGES.

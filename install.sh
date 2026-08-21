@@ -455,6 +455,34 @@ EOF
   fi
 }
 
+install_gitpane() {
+  # gitpane keeps its scan roots, theme and pinned repos in one TOML file that
+  # it also WRITES to (the `t` theme picker saves back to whichever path it
+  # loaded). Symlinking the tracked copy would therefore turn an in-app
+  # preference into a dirty repo, and worse, would make the scan roots -- which
+  # are machine-specific, and can name private paths -- tracked content in a
+  # public repo.
+  #
+  # So this is a seed, not a link: copy the template on a machine that has no
+  # config yet, then never touch it again. Machine-specific roots live only in
+  # the live file, the same way ~/.bashrc.local and ~/.claude/CLAUDE.machine.md
+  # hold their per-machine content.
+  local src="${DOTDIR}/gitpane/config.toml"
+  local dest="${XDG_CONFIG_HOME:-${HOME}/.config}/gitpane/config.toml"
+
+  [[ -e "$src" ]] || die "Missing gitpane config template: $(name "$src")"
+
+  if [[ -e "$dest" ]]; then
+    log "Kept existing gitpane config: $(name "$dest")"
+    return 0
+  fi
+
+  ensure_parent_dir "$dest"
+  cp -f "$src" "$dest"
+  log "Seeded gitpane config: $(name "$dest")"
+  log "  Add this machine's scan roots there; it is never overwritten again."
+}
+
 install_ssh_config() {
   local src="${DOTDIR}/ssh_config"
   local user_ssh_dir="${HOME}/.ssh"
@@ -1165,6 +1193,7 @@ main() {
   fi
   install_ranger
   install_mc_keymap
+  install_gitpane
   install_alacritty
   install_tmux
   install_claude

@@ -1,0 +1,57 @@
+# gitpane configuration — TEMPLATE, not the live file.
+#
+# install.sh copies this to ~/.config/gitpane/config.toml only when that file
+# does not exist yet, and never touches it again. It is deliberately NOT a
+# symlink into this repo, for two reasons:
+#
+#   - gitpane writes to its own config. The `t` theme picker saves the chosen
+#     theme back to whichever path it loaded, so a symlink would turn every
+#     in-app preference into a dirty tracked file.
+#   - Scan roots are machine-specific, and this repo is public. Absolute paths
+#     outside $HOME, work checkouts, anything particular to one machine: those
+#     belong in the live copy and must never be committed here. Same arrangement
+#     as ~/.bashrc.local and ~/.claude/CLAUDE.machine.md.
+#
+# So: edit ~/.config/gitpane/config.toml for a machine. Edit THIS file only to
+# change what a brand new machine starts with.
+#
+# Config resolution order, first hit wins: $GITPANE_CONFIG (a full path),
+# $XDG_CONFIG_HOME/gitpane/config.toml, ~/.config/gitpane/config.toml, then the
+# OS-native location. gitpane logs the path it resolved at startup on stderr.
+
+# Directories scanned for git repositories. Machine-specific roots go in the
+# LIVE copy of this file, not here.
+root_dirs = ["~/code"]
+
+# Maximum depth, counted from each root, at which a `.git` still counts:
+#
+#   ~/code                         depth 0
+#   ~/code/<repo>                  depth 1
+#   ~/code/<repo>/.git             depth 2   <- the flat layout in ~/code
+#   ~/code/<group>/<repo>/.git     depth 3   <- headroom for one level of nesting
+#
+# Upstream's default is 2, which is already enough for a flat ~/code. 3 costs
+# one more level of walking and means a grouped checkout is not silently absent.
+scan_depth = 3
+
+# Always sorted to the top of the list.
+pinned_repos = []
+
+# Matched against the repo directory name or any path component.
+excluded_repos = ["node_modules", ".cargo", "target", ".direnv"]
+
+[watch]
+# Stop polling when the pane is hidden or the session is idle. Worth having on
+# with several roots: gitpane fetches from every remote on a timer otherwise.
+sleep_when_hidden = true
+doze_after_secs = 120
+
+[ui]
+# Upstream default is true; off here because updates arrive through nix-env and
+# gitpane.nix, so a "new version available" toast is something this machine
+# cannot act on directly.
+check_for_updates = false
+
+# [open] is intentionally unset. With no command configured and gitpane running
+# inside tmux, `o` opens a new tmux pane at the selected repo's directory, which
+# is the right behaviour here. Set `command = "..."` to launch an editor instead.

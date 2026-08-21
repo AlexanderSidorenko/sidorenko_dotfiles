@@ -9,6 +9,8 @@ install.sh          — interactive installer; idempotent, safe to re-run
 shrc                — unified shell config sourced by both bash and zsh
 gitconfig           — git defaults (delta, nvim, moor pager)
 gitconfig.personal  — optional personal identity include
+gitpane.nix         — nix derivation for gitpane (not in nixpkgs); see NIX_LOCAL_DERIVATIONS
+gitpane/            — gitpane config TEMPLATE, seeded to ~/.config/gitpane (never symlinked)
 tmux.conf           — tmux config; prefix Ctrl+Space, vi keys
 ripgreprc           — global rg flags
 tigrc               — tig config
@@ -75,6 +77,18 @@ shellcheck bin/lib/meminfo.sh    # has a `shell=bash` directive, no shebang
 - `shrc` is sourced by both bash and zsh — avoid bashisms or zshisms outside their respective `if` blocks.
 - Tool integrations (fzf, zoxide, etc.) are guarded with `command -v` checks; keep this consistent for new additions.
 - New tools that should be installed by default go in `install.sh:install_nix_packages`. Look up exact Nix attribute names at https://search.nixos.org/packages before adding. Platform-specific packages (e.g., wl-clipboard, xclip) go in the Linux-only section.
+- A tool that is **not in nixpkgs** gets a derivation at the repo root and an
+  entry in `NIX_LOCAL_DERIVATIONS` (`nix-packages.sh`), as `"<file>.nix <attr>"`.
+  `nix_install` builds those after the channel packages, so `nix_reinstall` —
+  which wipes the profile with `nix-env -e '*'` — puts them back too. `gitpane.nix`
+  is the worked example, including how to bump its pinned version.
+- Most configs are symlinked, but a config the **application itself writes to**
+  must be seeded instead: copy it on a machine that has none, then never touch
+  it again (`install.sh:install_gitpane`). Symlinking one turns every in-app
+  preference into a dirty tracked file, and makes machine-specific content —
+  scan roots, private paths — tracked content in a public repo. Per-machine
+  values belong in the live copy only, like `~/.bashrc.local` and
+  `~/.claude/CLAUDE.machine.md`.
 - `~/.bashrc.local` is sourced last for machine-specific overrides not tracked in this repo.
 - Claude Code instructions are tiered: `claude/CLAUDE.md` (tracked, symlinked to
   `~/.claude/CLAUDE.md`) holds global-all-machines content and ends by importing
