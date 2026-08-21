@@ -20,8 +20,10 @@
 # OS-native location. gitpane logs the path it resolved at startup on stderr.
 
 # Directories scanned for git repositories. Machine-specific roots go in the
-# LIVE copy of this file, not here.
-root_dirs = ["~/code"]
+# LIVE copy of this file, not here. ~/.sidorenko_dotfiles earns its place among
+# the generic ones because the bootstrap clones to exactly that path on every
+# machine -- and it is the repo you are most likely to have forgotten to push.
+root_dirs = ["~/code", "~/.sidorenko_dotfiles"]
 
 # Maximum depth, counted from each root, at which a `.git` still counts:
 #
