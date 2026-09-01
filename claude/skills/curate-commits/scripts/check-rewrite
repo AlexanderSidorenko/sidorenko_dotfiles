@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Guard rails for rewriting git history: snapshot before, verify after.
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+check-rewrite - guard rails for rewriting git history
+
+  check-rewrite backup [BRANCH]          create backup/pre-rewrite-BRANCH
+  check-rewrite verify BACKUP_REF BRANCH compare trees and scan messages
+
+verify reports:
+  * content differences between the backup and the rewritten branch
+    (empty is the usual goal; anything listed must be a change you meant)
+  * commit messages that narrate the work instead of stating the decision
+  * branch-relative GitHub links, which rot within a year
+
+Exit status is 1 if narration is found, so it can gate a publish step.
+Run from inside the repository.
+USAGE
+}
+
+[ $# -ge 1 ] || { usage; exit 2; }
+
+case "$1" in
+  -h|--help|help) usage; exit 0 ;;
+
+  backup)
+    branch="${2:-$(git rev-parse --abbrev-ref HEAD)}"
+    ref="backup/pre-rewrite-$branch"
+    git rev-parse --verify "$branch" >/dev/null 2>&1 || {
+      echo "no such branch: $branch" >&2; exit 2; }
+    git branch -f "$ref" "$branch"
+    echo "$ref -> $(git rev-parse --short "$ref")"
+    ;;
+
+  verify)
+    [ $# -eq 3 ] || { usage; exit 2; }
+    backup="$2"; branch="$3"
+    for r in "$backup" "$branch"; do
+      git rev-parse --verify "$r" >/dev/null 2>&1 || {
+        echo "no such ref: $r" >&2; exit 2; }
+    done
+
+    echo "== content difference: $backup -> $branch"
+    if git diff --quiet "$backup" "$branch"; then
+      echo "   none - trees are identical"
+    else
+      git diff --stat "$backup" "$branch" | sed 's/^/   /'
+      echo "   (every line above must be a change you intended)"
+    fi
+
+    echo "== commit count"
+    printf '   %s: %s\n' "$backup" "$(git rev-list --count "$backup")" \
+                         "$branch" "$(git rev-list --count "$branch")"
+
+    base=$(git merge-base "$backup" "$branch" 2>/dev/null || true)
+    range="$branch"; [ -n "$base" ] && range="$base..$branch"
+
+    echo "== messages that narrate the work"
+    narr=$(git log --format='%h%x1f%B%x1e' "$range" | tr '\036' '\n' |
+      grep -iE '[a-f0-9]{7}.*(fix(ing|ed|es)?\b.*\bcaused by|fix(ing|ed)? (the )?(typo|last|previous|earlier)|(the|my|a) (last|previous|earlier) commit|as (i|we) (said|noted) (before|earlier)|(i|we) (got|had) (this|it) wrong|turned out|it turns out|an earlier version|a previous (run|commit|version)|silently produced|forgot to|oops|address(ing)? review|actually (make|works?)|now that .* (is|are|was|were) committed|no longer needed because (i|we))' || true)
+    if [ -n "$narr" ]; then
+      echo "$narr" | cut -c1-120 | sed 's/^/   /'
+    else
+      echo "   none found"
+    fi
+
+    echo "== branch-relative GitHub links (should be SHA-pinned)"
+    bad=$(git log --format='%B' "$range" |
+      grep -oE 'https://github\.com/[^ )]+' |
+      grep -E '/(blob|tree|raw)/(main|master|HEAD)/' || true)
+    if [ -n "$bad" ]; then echo "$bad" | sed 's/^/   /'; else echo "   none found"; fi
+
+    [ -z "$narr" ] || exit 1
+    ;;
+
+  *) usage; exit 2 ;;
+esac
