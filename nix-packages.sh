@@ -5,6 +5,7 @@
 NIX_PACKAGES=(
   ast-grep
   bat
+  btop
   caligula
   cargo
   cargo-deny
