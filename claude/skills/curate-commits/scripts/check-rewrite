@@ -7,15 +7,20 @@ usage() {
 check-rewrite - guard rails for rewriting git history
 
   check-rewrite backup [BRANCH]          create backup/pre-rewrite-BRANCH
-  check-rewrite verify BACKUP_REF BRANCH compare trees and scan messages
+  check-rewrite verify BACKUP_REF BRANCH [--links]
+                                         compare trees and scan messages
 
 verify reports:
   * content differences between the backup and the rewritten branch
     (empty is the usual goal; anything listed must be a change you meant)
   * commit messages that narrate the work instead of stating the decision
   * branch-relative GitHub links, which rot within a year
+  * with --links, whether every permalink actually resolves. Needs network
+    and is slow, so it is opt-in. A pinned URL that 404s is worse than an
+    unpinned one: it looks checked and is not.
 
-Exit status is 1 if narration is found, so it can gate a publish step.
+Exit status is 1 if narration or a dead permalink is found, so it can gate a
+publish step.
 Run from inside the repository.
 USAGE
 }
@@ -35,8 +40,9 @@ case "$1" in
     ;;
 
   verify)
-    [ $# -eq 3 ] || { usage; exit 2; }
-    backup="$2"; branch="$3"
+    [ $# -ge 3 ] || { usage; exit 2; }
+    backup="$2"; branch="$3"; links=""
+    [ "${4:-}" = "--links" ] && links=1
     for r in "$backup" "$branch"; do
       git rev-parse --verify "$r" >/dev/null 2>&1 || {
         echo "no such ref: $r" >&2; exit 2; }
@@ -72,7 +78,34 @@ case "$1" in
       grep -E '/(blob|tree|raw)/(main|master|HEAD)/' || true)
     if [ -n "$bad" ]; then echo "$bad" | sed 's/^/   /'; else echo "   none found"; fi
 
-    [ -z "$narr" ] || exit 1
+    dead=""
+    if [ -n "$links" ]; then
+      echo "== permalinks that do not resolve"
+      msgs=$(git log --format='%B' "$range")
+
+      while read -r u; do
+        [ -n "$u" ] || continue
+        code=$(curl -sL --max-time 25 -o /dev/null -w '%{http_code}' "$u" || echo 000)
+        [ "$code" = "200" ] || dead="$dead$code $u"$'\n'
+      done <<< "$(echo "$msgs" | grep -oE 'https://github\.com/[^ )]+' | sort -u)"
+
+      # printables.com serves 403 to anything that is not a browser, so a page
+      # fetch proves nothing; ask the API whether the model id exists instead.
+      while read -r id; do
+        [ -n "$id" ] || continue
+        name=$(curl -s --max-time 25 'https://api.printables.com/graphql/' \
+          -H 'content-type: application/json' -H 'user-agent: Mozilla/5.0' \
+          -d "{\"query\":\"query(\$id:ID!){print(id:\$id){name}}\",\"variables\":{\"id\":\"$id\"}}" \
+          | grep -o '"name":"[^"]*"' | head -1 || true)
+        [ -n "$name" ] || dead="${dead}gone printables.com/model/$id"$'\n'
+      done <<< "$(echo "$msgs" | grep -oE 'printables\.com/model/[0-9]+' |
+                  grep -oE '[0-9]+$' | sort -u)"
+
+      if [ -n "$dead" ]; then echo "$dead" | sed '/^$/d;s/^/   /'
+      else echo "   all resolve"; fi
+    fi
+
+    [ -z "$narr" ] && [ -z "$dead" ] || exit 1
     ;;
 
   *) usage; exit 2 ;;

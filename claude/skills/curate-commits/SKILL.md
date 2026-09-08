@@ -81,15 +81,50 @@ git branch -M rewrite <branch>
 scripts/check-rewrite verify backup/pre-rewrite-<branch> <branch>
 ```
 
-To materialise a group's tree when rewriting an existing history, check out the
-old commit that ended that group — `git checkout <old-sha> -- .` after clearing
-the worktree — which folds every intermediate commit in that group for free.
+Materialising a group's tree has two cases. When the new commits are a
+contiguous partition of the old ones, check out the old commit that ended each
+group — `git checkout <old-sha> -- .` after clearing the worktree — which folds
+every intermediate commit for free.
 
-Two traps:
+When they are not — because folding an undo pair means a file has to land under
+its *final* name in the commit that first adds it, not under the name it
+originally had — no old commit has the tree you want. Build a path-to-commit
+assignment instead, sourcing content from the final tree:
+
+```sh
+# for each commit k, in order:
+#   remove the paths that commit deletes, check out the paths it introduces
+git rm -q -f -- <paths deleted by k>
+git checkout <final-branch> -- <paths introduced by k>
+git add -A && git commit -F <message-file>
+```
+
+Verify the assignment is *total before touching git*: every path in the final
+tree assigned to exactly one commit, and every path that exists upstream but not
+in the final tree explained by a commit that removes it. An unassigned path is a
+file that silently vanishes.
+
+A logical commit with no file change — a decision recorded in prose and nothing
+else — will fail, because `git commit` refuses an empty tree change. Do not
+reach for `--allow-empty`: it means the decision has no home in the repo. Give it
+one by splitting the document that records it across the commits, so each
+decision commit carries the section that states it.
+
+Conform to the repo's own commit conventions rather than to the history you are
+replacing. If `CLAUDE.md` says summaries are present-participle and half the old
+commits are imperative, the rewrite is when that drift gets fixed — you are
+re-authoring every message anyway.
+
+Three traps:
 
 - `git checkout -B` fails if the worktree is dirty, and a failed branch switch
   leaves you committing onto the *current* branch. Verify with
   `git rev-parse --abbrev-ref HEAD` after switching, before committing.
+- A rewrite takes minutes and the worktree is not frozen while it runs. If a
+  file goes dirty mid-rewrite, read the change before doing anything with it —
+  the user may have edited it in another window, and stashing or discarding
+  their work to unblock yourself is the worst available outcome. Fold it into
+  the commit it belongs to instead.
 - Rewriting a branch that others rebase onto reparents them; rebase those after.
 
 `check-rewrite` catches *phrasing* — it greps for narration and unpinned links.
@@ -100,7 +135,8 @@ only stops the wording slipping through.
 ## Before publishing
 
 - `scripts/check-rewrite verify` clean — the tree matches, minus changes you
-  intended.
+  intended. Add `--links` when messages carry permalinks: a pinned URL that
+  404s is worse than an unpinned one, because it looks checked.
 - No message narrates the work. Read each one as a stranger.
 - Every commit builds and is a decision someone could act on alone.
 - A backup ref still exists until the user has looked at the result.
