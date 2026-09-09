@@ -20,7 +20,9 @@ nvim/               — Neovim config (LazyVim-based, Lua)
 ranger/             — ranger file manager config
 claude/             — Claude Code config (settings.json, CLAUDE.md, skills/; symlinked into ~/.claude)
 bin/                — custom scripts (clip, mem, ram-health, ssh-host-setup.sh,
-                      zswap-setup.sh, neovide)
+                      zswap-setup.sh, neovide, tmux-snapshot, tmux-restore,
+                      and the PR review helpers: pr-prep, pr-draft, pr-diff,
+                      pr-threads)
 bin/lib/            — sourced helpers, not executables (meminfo.sh)
 githooks/           — this repo's own git hooks (commit-msg enforces [job] prefix)
 ```
@@ -100,6 +102,14 @@ shellcheck bin/lib/meminfo.sh    # has a `shell=bash` directive, no shebang
   format, https://agentskills.io — portable across agents). Keep frontmatter
   spec-minimal (`name` + `description`); avoid Claude-Code-only fields unless a
   skill really needs them. Work-only skills go on the `job` branch.
+- A **family** of related skills keeps its shared prose in one
+  `claude/skills/<family>-references/` directory, which deliberately has no
+  `SKILL.md`: every skill's description competes for one listing budget, so a
+  contract stated once as reference material costs nothing, while a seventh
+  skill to hold it would. Skills reach it as `../<family>-references/<file>`;
+  `req-references/` and `pr-references/` are the worked examples. The
+  *mechanical* half of a family belongs in `bin/` instead — a tested script
+  doesn't decay when context is compacted, and re-deriving one every run does.
 
 ## Git workflow
 

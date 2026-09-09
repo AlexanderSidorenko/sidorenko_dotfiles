@@ -1,0 +1,347 @@
+#!/usr/bin/env bash
+# pr-diff — inspect and diff the pushed iterations of a GitHub PR.
+#
+# Usage:
+#   pr-diff                          interactive: pick a PR (fzf), see its
+#                                    iterations, pick FROM/TO, diff
+#   pr-diff <pr>                     list iterations; on a tty, then prompt
+#                                    FROM [default: last] / TO [default: head]
+#   pr-diff <pr> <from> [<to>]       diff two iterations non-interactively
+#   pr-diff <pr> <from> <to> -- <git diff args>     e.g. -- --stat
+#
+# <pr> is a number or URL. <from>/<to> are iteration indexes from the list,
+# any committish, or keywords:
+#   last  = the commit your most recent GitHub review on this PR is pinned to
+#           (falls back to refs/claude-review/pr-<n> if you never reviewed)
+#   head  = the PR's current head       (aliases: latest, new)
+#
+# The diff is rebase-aware. A force-push that rebases lands the PR on a newer
+# base, and a plain `git diff` between the two heads is then dominated by
+# whatever the rebase picked up off the target branch — the one line the author
+# actually changed drowns in base churn. So when the two ends sit on different
+# bases, pr-diff replays FROM onto TO's base (a three-way merge via
+# `git merge-tree`; no worktree, index or ref is touched) and diffs that
+# instead. The base delta cancels out and only the author's own edits are left.
+# It says so on stderr when it does this, because the '-' side is then a
+# synthetic tree whose line numbers are not FROM's.
+#
+# When both ends share a base — an ordinary non-rebasing push — nothing
+# changes: it is the same plain `git diff FROM TO` it always was.
+#
+# Options (before any `--`):
+#   --literal        raw `git diff FROM TO`, base churn and all
+#   --range-diff     commit-level `git range-diff`: pairs commits across the two
+#                    iterations and diffs their patches, so it also shows commit
+#                    message edits, reordering and dropped commits. If it splits
+#                    a pair that is really one commit, loosen the pairing with
+#                    `-- --creation-factor=90`
+#   --base <ref>     override the target branch (default: the PR's base ref)
+#   -h, --help       this text
+#
+# Either diff is handed to git untouched, so pager.diff (delta), --stat,
+# pathspecs and everything after `--` behave exactly as they always have.
+set -euo pipefail
+
+die()  { echo "pr-diff: $*" >&2; exit 1; }
+warn() { echo "pr-diff: $*" >&2; }
+need() { command -v "$1" >/dev/null || die "missing dependency: $1"; }
+usage() { sed -n '2,${/^#/!q; s/^# \{0,1\}//; p;}' "$0"; }
+need gh; need jq; need git
+
+# ---------------------------------------------------------------- arguments
+POS=(); GIT_DIFF_ARGS=(); MODE=normalized; BASE_OVERRIDE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --)           shift; GIT_DIFF_ARGS=("$@"); break ;;
+        --literal)    MODE=literal; shift ;;
+        --range-diff) MODE=range;   shift ;;
+        --base)       [ $# -ge 2 ] || die "--base needs a ref"
+                      BASE_OVERRIDE=$2; shift 2 ;;
+        --base=*)     BASE_OVERRIDE=${1#--base=}; shift ;;
+        -h|--help)    usage; exit 0 ;;
+        -*)           die "unknown option: $1 (git diff args go after '--')" ;;
+        *)            POS+=("$1"); shift ;;
+    esac
+done
+[ ${#POS[@]} -le 3 ] || die "too many positional args (want: [pr] [from] [to] [-- git-diff-args])"
+PR="${POS[0]:-}"
+FROM_ARG="${POS[1]:-}"
+TO_ARG="${POS[2]:-}"
+
+# Accept a PR URL.
+case "$PR" in
+    *github.com*/pull/*) PR="${PR##*/pull/}"; PR="${PR%%[^0-9]*}" ;;
+esac
+
+# ------------------------------------------------------------- PR selection
+if [ -z "$PR" ]; then
+    LIST=$(gh pr list --state open --limit 100 \
+        --json number,title,author,updatedAt \
+        --jq '.[] | "#\(.number)\t\(.title)\t(\(.author.login), updated \(.updatedAt[0:10]))"')
+    [ -n "$LIST" ] || die "no open PRs"
+    if [ -t 1 ] && command -v fzf >/dev/null; then
+        PICK=$(printf '%s\n' "$LIST" | column -t -s "$(printf '\t')" \
+            | fzf --prompt="PR> " --height=~40% --reverse) || exit 130
+        PR=$(printf '%s' "$PICK" | sed -n 's/^#\([0-9]*\).*/\1/p')
+    else
+        printf '%s\n' "$LIST" | column -t -s "$(printf '\t')"
+        exit 0
+    fi
+fi
+case "$PR" in (*[!0-9]*|"") die "bad PR number: '$PR'";; esac
+
+# --------------------------------------------------- gather iteration chain
+REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+OWNER=${REPO%/*}; NAME=${REPO#*/}
+
+# shellcheck disable=SC2016  # $o/$n/$pr are GraphQL variables, not shell ones
+PRJSON=$(gh api graphql \
+    -f query='query($o: String!, $n: String!, $pr: Int!) {
+      repository(owner: $o, name: $n) { pullRequest(number: $pr) {
+        createdAt headRefOid headRefName baseRefName baseRefOid state
+        timelineItems(first: 250, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) {
+          nodes { ... on HeadRefForcePushedEvent {
+            createdAt beforeCommit { oid } afterCommit { oid } } }
+        }
+      } }
+    }' -f o="$OWNER" -f n="$NAME" -F pr="$PR" \
+    --jq '.data.repository.pullRequest')
+[ "$(jq -r .state <<<"$PRJSON")" != "null" ] || die "PR #$PR not found"
+
+HEAD_OID=$(jq -r .headRefOid <<<"$PRJSON")
+CREATED=$(jq -r .createdAt <<<"$PRJSON")
+BASE_REF_NAME=$(jq -r .baseRefName <<<"$PRJSON")
+BASE_TIP=$(jq -r .baseRefOid <<<"$PRJSON")
+
+# Sequence of head states: each force-push contributes before+after; adjacent
+# duplicates collapse; interim normal pushes surface as before-commits that
+# differ from the previous after-commit. Timestamps: force-push events carry
+# their own; other states fall back to the tip commit's committer date.
+mapfile -t CHAIN < <(jq -r '
+    [ .timelineItems.nodes[]
+      | [.beforeCommit.oid, "?"], [.afterCommit.oid, .createdAt] ]
+    | flatten
+    | . as $flat
+    | [range(0; length; 2) | {sha: $flat[.], ts: $flat[.+1]}]
+    | .[] | "\(.sha)\t\(.ts)"' <<<"$PRJSON")
+CHAIN+=("$HEAD_OID	?")
+
+SHAS=(); TSS=()
+for row in "${CHAIN[@]}"; do
+    sha=${row%%	*}; ts=${row#*	}
+    [ ${#SHAS[@]} -gt 0 ] && [ "${SHAS[-1]}" = "$sha" ] && continue
+    SHAS+=("$sha"); TSS+=("$ts")
+done
+[ "${TSS[0]}" = "?" ] && TSS[0]="$CREATED"
+
+# --base overrides the PR's own target branch (retargeted PRs, experiments).
+if [ -n "$BASE_OVERRIDE" ]; then
+    BASE_REF_NAME="$BASE_OVERRIDE"
+    BASE_TIP=$(git rev-parse --verify --quiet "$BASE_OVERRIDE^{commit}" || true)
+    if [ -z "$BASE_TIP" ]; then
+        git fetch --quiet origin "$BASE_OVERRIDE" 2>/dev/null || true
+        BASE_TIP=$(git rev-parse --verify --quiet 'FETCH_HEAD^{commit}' || true)
+    fi
+    [ -n "$BASE_TIP" ] || die "cannot resolve --base '$BASE_OVERRIDE'"
+fi
+
+# Fetch every iteration tip we don't have (GitHub serves orphaned SHAs), plus
+# the target branch tip, which is what every merge-base below is taken against.
+MISSING=()
+for sha in "${SHAS[@]}" "$BASE_TIP"; do
+    [ -n "$sha" ] && [ "$sha" != "null" ] || continue
+    git cat-file -e "$sha^{commit}" 2>/dev/null || MISSING+=("$sha")
+done
+if [ ${#MISSING[@]} -gt 0 ]; then
+    git fetch --quiet origin "${MISSING[@]}" 2>/dev/null || {
+        for sha in "${MISSING[@]}"; do
+            git fetch --quiet origin "$sha" 2>/dev/null || true
+        done
+    }
+fi
+
+# The base an iteration sat on: its fork point from the target branch. Empty if
+# either end is unfetchable or the histories are unrelated.
+base_of() {
+    [ -n "$BASE_TIP" ] && [ "$BASE_TIP" != "null" ] || return 0
+    git merge-base "$BASE_TIP" "$1" 2>/dev/null || true
+}
+
+# ------------------------------------------------ where did I last look?
+ME=$(gh api user -q .login)
+# `last` = most recently *submitted* review (drafts/PENDING don't count as
+# having looked at the PR state).
+LAST_REVIEWED=$(gh api "repos/$REPO/pulls/$PR/reviews" \
+    --jq "[.[] | select(.user.login == \"$ME\" and .state != \"PENDING\")]
+          | sort_by(.submitted_at) | last | .commit_id // empty" \
+    2>/dev/null || true)
+declare -A REVIEW_MARK=()
+while IFS=$'\t' read -r rsha rstate rdate; do
+    [ -n "$rsha" ] || continue
+    if [ "$rstate" = "PENDING" ]; then
+        REVIEW_MARK[$rsha]="${REVIEW_MARK[$rsha]:-}<- you: PENDING (unsubmitted draft) "
+    else
+        REVIEW_MARK[$rsha]="${REVIEW_MARK[$rsha]:-}<- you: $rstate @ ${rdate:0:10} "
+    fi
+done < <(gh api "repos/$REPO/pulls/$PR/reviews" \
+    --jq ".[] | select(.user.login == \"$ME\") | [.commit_id, .state, .submitted_at] | @tsv" \
+    2>/dev/null || true)
+CLAUDE_REF=$(git rev-parse --verify --quiet "refs/claude-review/pr-$PR" || true)
+[ -z "$LAST_REVIEWED" ] && LAST_REVIEWED="$CLAUDE_REF"
+
+# Which iteration index (1-based) does `last` resolve to, if any?
+LAST_IDX=""
+if [ -n "$LAST_REVIEWED" ]; then
+    for i in "${!SHAS[@]}"; do
+        [ "${SHAS[$i]}" = "$LAST_REVIEWED" ] && LAST_IDX=$((i+1))
+    done
+fi
+
+# ------------------------------------------------------- print iterations
+print_list() {
+    local i sha ts subj marks when tag base prev_base=""
+    echo "PR #$PR iterations (oldest -> newest); base = fork point from ${BASE_REF_NAME:-?}:"
+    for i in "${!SHAS[@]}"; do
+        sha=${SHAS[$i]}; ts=${TSS[$i]}
+        if git cat-file -e "$sha^{commit}" 2>/dev/null; then
+            subj=$(git log -1 --format=%s "$sha")
+            [ "$ts" = "?" ] && ts=$(git log -1 --format=%cI "$sha")
+            base=$(base_of "$sha")
+        else
+            subj="(commit not fetchable)"
+            [ "$ts" = "?" ] && ts=""
+            base=""
+        fi
+        when=$(date -d "$ts" +'%Y-%m-%d %H:%M' 2>/dev/null \
+            || echo "$ts" | sed 's/T/ /; s/Z$//' | cut -c1-16)
+        tag=""
+        [ "$((i+1))" -eq "${#SHAS[@]}" ] && tag="[head] "
+        [ -n "$LAST_IDX" ] && [ "$((i+1))" -eq "$LAST_IDX" ] && tag="${tag}[last] "
+        # A force-push that moved the fork point is a rebase, not just an edit.
+        [ -n "$base" ] && [ -n "$prev_base" ] && [ "$base" != "$prev_base" ] \
+            && tag="${tag}[rebased] "
+        [ -n "$base" ] && prev_base="$base"
+        marks="${REVIEW_MARK[$sha]:-}"
+        if [ -n "$CLAUDE_REF" ] \
+           && { [ "${sha:0:${#CLAUDE_REF}}" = "$CLAUDE_REF" ] || [ "$sha" = "$CLAUDE_REF" ]; }; then
+            marks="$marks<- claude baseline "
+        fi
+        printf '%2d  %s  %-8s  %-16s  %s  %s%s\n' \
+            "$((i+1))" "${sha:0:8}" "${base:0:8}" "$when" "$subj" "$tag" "$marks"
+    done
+    if [ -n "$LAST_REVIEWED" ] && [ -z "$LAST_IDX" ]; then
+        echo "    last = ${LAST_REVIEWED:0:8} (your latest review commit — not one of the listed iteration heads)"
+    fi
+}
+
+resolve() {
+    local tok=$1
+    case "$tok" in
+        last)
+            [ -n "$LAST_REVIEWED" ] || die "'last': you have no review on #$PR and no local baseline"
+            echo "$LAST_REVIEWED"; return ;;
+        head|latest|new) echo "$HEAD_OID"; return ;;
+    esac
+    # Small integers are iteration indexes; anything else (incl. all-digit
+    # short SHAs, which are longer than any plausible index) is a committish.
+    if [[ "$tok" =~ ^[0-9]+$ ]] && [ "$tok" -ge 1 ] && [ "$tok" -le "${#SHAS[@]}" ]; then
+        echo "${SHAS[$((tok-1))]}"; return
+    fi
+    git rev-parse --verify --quiet "$tok^{commit}" && return
+    git fetch --quiet origin "$tok" 2>/dev/null || true
+    git rev-parse --verify --quiet "$tok^{commit}" || die "cannot resolve '$tok'"
+}
+
+# ------------------------------------------------------------------ modes
+if [ -z "$FROM_ARG" ]; then
+    print_list
+    # Non-interactive callers just get the list.
+    [ -t 0 ] && [ -t 1 ] || exit 0
+    echo
+    if [ -n "$LAST_IDX" ]; then
+        from_default="last"; from_hint="last = $LAST_IDX"
+    elif [ -n "$LAST_REVIEWED" ]; then
+        from_default="last"; from_hint="last = ${LAST_REVIEWED:0:8}"
+    else
+        from_default="1"; from_hint="1 (you have no review here)"
+    fi
+    read -r -p "diff FROM [$from_hint]: " FROM_ARG
+    read -r -p "diff TO   [head = ${#SHAS[@]}]: " TO_ARG
+    FROM_ARG=${FROM_ARG:-$from_default}
+    TO_ARG=${TO_ARG:-head}
+fi
+TO_ARG=${TO_ARG:-head}
+
+FROM=$(resolve "$FROM_ARG")
+TO=$(resolve "$TO_ARG")
+
+if [ "$FROM" = "$TO" ]; then
+    echo "pr-diff: FROM and TO are the same commit ($(git rev-parse --short "$FROM")) — nothing changed."
+    exit 0
+fi
+
+# Ensure both ends exist locally.
+for c in "$FROM" "$TO"; do
+    git cat-file -e "$c^{commit}" 2>/dev/null || git fetch --quiet origin "$c"
+done
+
+literal_diff() { exec git diff "$FROM" "$TO" ${GIT_DIFF_ARGS[@]+"${GIT_DIFF_ARGS[@]}"}; }
+
+FROM_BASE=$(base_of "$FROM")
+TO_BASE=$(base_of "$TO")
+
+case "$MODE" in
+    literal) literal_diff ;;
+    range)
+        [ -n "$FROM_BASE" ] && [ -n "$TO_BASE" ] \
+            || die "--range-diff: cannot find the fork point of both ends from ${BASE_REF_NAME:-the target branch}"
+        exec git range-diff "$FROM_BASE..$FROM" "$TO_BASE..$TO" \
+            ${GIT_DIFF_ARGS[@]+"${GIT_DIFF_ARGS[@]}"} ;;
+esac
+
+# ------------------------------------------- normalized (rebase-aware) diff
+if [ -z "$FROM_BASE" ] || [ -z "$TO_BASE" ]; then
+    warn "cannot find the fork point of both ends from ${BASE_REF_NAME:-the target branch};"
+    warn "  showing the raw tree diff, which may include base-branch churn."
+    literal_diff
+fi
+
+# Same base on both ends: no rebase happened, so the tree diff already answers
+# the question. Byte-identical to --literal.
+[ "$FROM_BASE" = "$TO_BASE" ] && literal_diff
+
+MT_HELP=$(git merge-tree -h 2>&1 || true)
+case "$MT_HELP" in
+    *--write-tree*) ;;
+    *)  warn "$(git --version) has no 'merge-tree --write-tree' (needs 2.38+);"
+        warn "  showing the raw tree diff, which includes base-branch churn."
+        literal_diff ;;
+esac
+
+# Replay FROM onto TO's base: a three-way merge of FROM and TO_BASE with
+# FROM_BASE as the ancestor — the same three inputs a `git rebase --onto` would
+# use, so the same resulting tree, but squashed and without a worktree.
+set +e
+MT=$(git merge-tree --write-tree --name-only --merge-base="$FROM_BASE" "$FROM" "$TO_BASE")
+MT_RC=$?
+set -e
+if [ "$MT_RC" -gt 1 ]; then
+    warn "replaying ${FROM:0:8} onto ${TO_BASE:0:8} failed; showing the raw tree diff."
+    literal_diff
+fi
+TREE=${MT%%$'\n'*}
+
+warn "rebase between the two ends: ${FROM:0:8} forked at ${FROM_BASE:0:8}, ${TO:0:8} forked at ${TO_BASE:0:8} (${BASE_REF_NAME:-?})."
+warn "  Diffing a replay of ${FROM:0:8} onto ${TO_BASE:0:8}, so base-branch churn is excluded."
+warn "  The '-' side is that synthetic tree; its line numbers are not ${FROM:0:8}'s."
+if [ "$MT_RC" -eq 1 ]; then
+    warn "  The replay conflicted — the '-' side carries conflict markers in:"
+    while IFS= read -r p; do
+        [ -n "$p" ] || break
+        warn "    $p"
+    done < <(printf '%s\n' "$MT" | tail -n +2)
+    warn "  Those hunks are where the author resolved the rebase by hand."
+fi
+warn "  (--literal for the raw tree diff, --range-diff for the commit-level view.)"
+
+exec git diff "$TREE" "$TO" ${GIT_DIFF_ARGS[@]+"${GIT_DIFF_ARGS[@]}"}

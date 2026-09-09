@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# pr-prep — put this clone on a PR's head, clearing the last review's
+# leftovers on the way, and refusing if what it would clear is real work.
+#
+# The point is to be unattended in a clone kept for reviews — where a dirty
+# tree is always the previous review's residue — while still stopping hard the
+# one time it matters: the same command typed in the wrong repo, where the dirt
+# is somebody's uncommitted work.
+#
+# So it classifies rather than prompts. Every dirty path is either provably
+# review residue (removed) or it is not (refused, nothing touched).
+#
+# Usage:
+#   pr-prep <pr>              clean residue, check out the PR head
+#   pr-prep <pr> --dry-run    print the partition, change nothing
+#   pr-prep <pr> --force      clear unrecognized dirt too (last resort)
+#
+# <pr> is a number or a PR URL.
+#
+# Refuses when:
+#   - the PR does not resolve in this clone's repo — the wrong-repo tripwire
+#   - the current branch has commits its upstream does not, i.e. local work
+#   - any dirty path is not recognizable review residue
+#
+# Recognized residue:
+#   - REVIEW-PR-*.md / REVIEW-DRAFT-PR-*.md at the repo root
+#   - tracked files whose diff only *adds* comment lines carrying a
+#     REVIEW(claude) marker — the pre-2026-09 review format
+#   - scratch worktrees registered under a claude-review path
+#
+# Stale local PR branches from earlier runs are reported, not deleted: they are
+# inert clutter, and deleting branches is how work disappears. The report ends
+# with the command to prune them if you want that.
+#
+# shellcheck disable=SC2016  # $vars in the queries are GraphQL, not shell
+set -euo pipefail
+
+die()  { echo "pr-prep: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null || die "missing dependency: $1"; }
+usage() { sed -n '2,${/^#/!q; /^# shellcheck/d; s/^# \{0,1\}//; s/^#$//; p;}' "$0"; }
+need gh; need git
+
+DRY=0; FORCE=0; PRARG=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)  usage; exit 0 ;;
+        --dry-run)  DRY=1; shift ;;
+        --force)    FORCE=1; shift ;;
+        -*)         die "unknown option: $1 (see --help)" ;;
+        *)          [ -z "$PRARG" ] || die "one PR at a time (got '$PRARG' and '$1')"
+                    PRARG=$1; shift ;;
+    esac
+done
+[ -n "$PRARG" ] || { usage; exit 1; }
+
+git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT"
+
+case "$PRARG" in *github.com*/pull/*) PRARG=${PRARG##*/pull/}; PRARG=${PRARG%%[^0-9]*} ;; esac
+case "$PRARG" in ""|*[!0-9]*) die "bad PR number: '$PRARG'" ;; esac
+PR=$PRARG
+
+# ------------------------------------------------- 1. right repo, real PR?
+REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null) \
+    || die "cannot identify this clone's GitHub repo — is 'origin' a GitHub remote?"
+PRJSON=$(gh pr view "$PR" --json number,title,state,headRefName,baseRefName,isCrossRepository,author,url 2>/dev/null) \
+    || die "PR #$PR does not resolve in $REPO.
+  Either the number is wrong or this is not the repo you meant. Nothing was touched."
+PR_TITLE=$(jq -r .title <<<"$PRJSON")
+PR_STATE=$(jq -r .state <<<"$PRJSON")
+PR_HEADREF=$(jq -r .headRefName <<<"$PRJSON")
+PR_URL=$(jq -r .url <<<"$PRJSON")
+echo "PR #$PR in $REPO [$PR_STATE] — $PR_TITLE"
+
+# --------------------------------------------------- 2. local work present?
+CUR=$(git branch --show-current || true)
+if [ -n "$CUR" ] && UP=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null); then
+    AHEAD=$(git rev-list --count "$UP..HEAD")
+    if [ "$AHEAD" -gt 0 ] && [ "$FORCE" != 1 ]; then
+        die "branch '$CUR' has $AHEAD commit(s) not on $UP.
+  That is local work, not review residue. Nothing was touched.
+  Push or move it, or re-run with --force to proceed anyway."
+    fi
+    [ "$AHEAD" -gt 0 ] && echo "  warning: --force, ignoring $AHEAD unpushed commit(s) on '$CUR'" >&2
+fi
+if [ -n "$(git stash list)" ]; then
+    echo "  note: this clone has stashes ($(git stash list | wc -l)). They are not touched." >&2
+fi
+
+# ------------------------------------------- 3. partition the dirty paths
+# A modified tracked file counts as residue only when its diff adds nothing but
+# comment lines and at least one of them carries a marker. Anything less
+# certain is treated as real work.
+marker_only_edit() {
+    local f=$1 d
+    d=$(git diff -U0 -- "$f")
+    [ -n "$d" ] || return 1
+    awk '
+        /^(---|\+\+\+)/ { next }
+        /^-/            { bad=1; exit }
+        /^\+/ {
+            line = substr($0, 2)
+            sub(/^[[:space:]]+/, "", line)
+            if (line !~ /^(\/\/|#|;|\*|--|<!--)/) { bad=1; exit }
+            if (line ~ /REVIEW\(claude\)/) { marker=1 }
+            next
+        }
+        END { exit (bad || !marker) }
+    ' <<<"$d"
+}
+
+RESIDUE=(); UNKNOWN=()
+while IFS= read -r -d '' entry; do
+    st=${entry:0:2}; path=${entry:3}
+    case "$path" in *' -> '*) path=${path##* -> } ;; esac    # renames
+    case "$(basename "$path")" in
+        REVIEW-PR-*.md|REVIEW-DRAFT-PR-*.md) RESIDUE+=("$path"); continue ;;
+    esac
+    case "$st" in
+        ' M'|'M '|'MM')
+            if marker_only_edit "$path"; then RESIDUE+=("$path"); else UNKNOWN+=("$st $path"); fi ;;
+        *)  UNKNOWN+=("$st $path") ;;
+    esac
+done < <(git status --porcelain=v1 -z)
+
+# Scratch worktrees this family creates.
+STALE_WT=()
+while IFS= read -r line; do
+    case "$line" in
+        worktree\ *) wt=${line#worktree }
+            case "$wt" in *claude-review*) [ "$wt" = "$ROOT" ] || STALE_WT+=("$wt") ;; esac ;;
+    esac
+done < <(git worktree list --porcelain)
+
+# Local branches an earlier run left behind (reported only).
+STALE_BR=()
+while IFS= read -r b; do
+    [ "$b" = "$CUR" ] && continue
+    case "$b" in claude-review/*) STALE_BR+=("$b") ;; esac
+done < <(git for-each-ref --format='%(refname:short)' refs/heads)
+
+# --------------------------------------------------------------- 4. report
+echo
+if [ ${#RESIDUE[@]} -gt 0 ]; then
+    echo "review residue to clear (${#RESIDUE[@]}):"
+    printf '  %s\n' "${RESIDUE[@]}"
+fi
+if [ ${#STALE_WT[@]} -gt 0 ]; then
+    echo "scratch worktrees to remove (${#STALE_WT[@]}):"
+    printf '  %s\n' "${STALE_WT[@]}"
+fi
+if [ ${#UNKNOWN[@]} -gt 0 ]; then
+    echo "NOT review residue (${#UNKNOWN[@]}):"
+    printf '  %s\n' "${UNKNOWN[@]}"
+fi
+if [ ${#RESIDUE[@]} -eq 0 ] && [ ${#STALE_WT[@]} -eq 0 ] && [ ${#UNKNOWN[@]} -eq 0 ]; then
+    echo "tree is clean; nothing to clear"
+fi
+
+if [ ${#UNKNOWN[@]} -gt 0 ] && [ "$FORCE" != 1 ]; then
+    echo >&2
+    die "the paths above are not review residue — this looks like real work.
+  Nothing was touched. Park it with 'git stash push -u', or re-run with
+  --force if you are certain it is disposable."
+fi
+
+if [ "$DRY" = 1 ]; then
+    echo
+    echo "--dry-run: nothing changed. Would check out #$PR ($PR_HEADREF)."
+    exit 0
+fi
+
+# ---------------------------------------------------------------- 5. clean
+for wt in ${STALE_WT[@]+"${STALE_WT[@]}"}; do
+    git worktree remove --force "$wt" && echo "removed worktree $wt"
+done
+if [ "$FORCE" = 1 ] && [ ${#UNKNOWN[@]} -gt 0 ]; then
+    git reset --quiet HEAD -- . 2>/dev/null || true
+    git checkout --quiet -- . 2>/dev/null || true
+    git clean -qfd
+    echo "cleared everything (--force)"
+elif [ ${#RESIDUE[@]} -gt 0 ]; then
+    TRACKED=(); UNTRACKED=()
+    for f in "${RESIDUE[@]}"; do
+        if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then TRACKED+=("$f"); else UNTRACKED+=("$f"); fi
+    done
+    [ ${#TRACKED[@]} -gt 0 ] && git checkout --quiet -- "${TRACKED[@]}"
+    [ ${#UNTRACKED[@]} -gt 0 ] && rm -f -- "${UNTRACKED[@]}"
+    echo "cleared ${#RESIDUE[@]} residue path(s)"
+fi
+
+# ------------------------------------------------------------- 6. check out
+# --force resets an existing local branch of the same name to the PR head; the
+# checks above already established there is no local work to lose.
+gh pr checkout "$PR" --force \
+    || die "gh pr checkout $PR failed. The tree was already cleaned, so a retry is safe."
+echo "on $(git branch --show-current) @ $(git rev-parse --short HEAD) — $PR_URL"
+
+if [ ${#STALE_BR[@]} -gt 0 ]; then
+    echo
+    echo "note: ${#STALE_BR[@]} leftover branch(es) from earlier runs; prune with:"
+    printf '  git branch -D %s\n' "${STALE_BR[*]}"
+fi

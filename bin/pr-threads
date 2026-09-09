@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# pr-threads — status of unresolved review threads on a PR, with signals for
+# "did the code change under this thread since it was written".
+#
+# Usage:
+#   pr-threads <pr>          list unresolved threads
+#   pr-threads <pr> --all    include resolved threads too
+#
+# Signals per thread:
+#   outdated      GitHub's own flag: the diff hunk the comment anchored to has
+#                 changed (strong hint the code moved since the comment)
+#   file-changed  the file differs between the commit the thread was written
+#                 against and the current head (computed locally when both
+#                 commits are available)
+#
+# Read-only: never resolves, never comments. Judgment about whether a change
+# actually *addresses* a thread stays with a human (or the review skills).
+set -euo pipefail
+
+die() { echo "pr-threads: $*" >&2; exit 1; }
+command -v gh >/dev/null || die "missing gh"
+command -v jq >/dev/null || die "missing jq"
+
+PR="${1:?usage: pr-threads <pr-number> [--all]}"
+case "$PR" in *github.com*/pull/*) PR="${PR##*/pull/}"; PR="${PR%%[^0-9]*}";; esac
+ALL="${2:-}"
+
+REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+OWNER=${REPO%/*}; NAME=${REPO#*/}
+
+DATA=$(gh api graphql -f query='query($o: String!, $n: String!, $pr: Int!) {
+  repository(owner: $o, name: $n) { pullRequest(number: $pr) {
+    headRefOid
+    reviewThreads(first: 100) { nodes {
+      isResolved isOutdated path line originalLine
+      comments(first: 50) { nodes {
+        author { login } createdAt bodyText url
+        originalCommit { oid }
+      } }
+    } }
+  } }
+}' -f o="$OWNER" -f n="$NAME" -F pr="$PR" --jq '.data.repository.pullRequest')
+
+HEAD_OID=$(jq -r .headRefOid <<<"$DATA")
+ME=$(gh api user -q .login)
+
+JQSEL='select(.isResolved | not)'
+[ "$ALL" = "--all" ] && JQSEL='.'
+
+# Colors + OSC-8 hyperlinks on a tty; plain parseable output otherwise.
+if [ -t 1 ]; then
+    TTY=1
+    C_DIM=$'\e[2m'; C_YEL=$'\e[33m'; C_CYN=$'\e[36m'; C_GRN=$'\e[32m'
+    C_BLD=$'\e[1m'; C_RST=$'\e[0m'
+    printf '%s %-3s %-30s %-4s %-14s %-5s %s%s\n' "$C_BLD" \
+        "#" "WHERE (click to open)" "AGE" "WHO (first→last)" "FLAGS" "EXCERPT" "$C_RST"
+else
+    TTY=0
+fi
+
+shorten() { # login -> "you" for the user, else first 7 chars
+    if [ "$1" = "$ME" ]; then echo you; else echo "${1:0:7}"; fi
+}
+
+COUNT=0
+while IFS=$'\t' read -r resolved outdated path line oline author created \
+        lastauthor lastdate origoid url body; do
+    COUNT=$((COUNT+1))
+    age=$(( ( $(date +%s) - $(date -d "$created" +%s) ) / 86400 ))
+    lineno=$([ "$line" != "-" ] && echo "$line" || echo "$oline")
+    filechanged=false
+    if [ -n "$origoid" ] && [ "$origoid" != "null" ] \
+        && git cat-file -e "$origoid^{commit}" 2>/dev/null \
+        && git cat-file -e "$HEAD_OID^{commit}" 2>/dev/null; then
+        git diff --quiet "$origoid" "$HEAD_OID" -- "$path" 2>/dev/null || filechanged=true
+    fi
+
+    if [ "$TTY" = 1 ]; then
+        # Pad VISIBLE text first, colorize whole cells after — keeps columns
+        # aligned regardless of escape-sequence byte counts.
+        where=$(printf '%-30.30s' "${path##*src/}:${lineno}")
+        who=$(printf '%-14.14s' "$(shorten "$author")→$(shorten "$lastauthor")")
+        flags_plain=""
+        [ "$resolved" = "true" ] && flags_plain="${flags_plain}R"
+        [ "$outdated" = "true" ] && flags_plain="${flags_plain}O"
+        [ "$filechanged" = true ] && flags_plain="${flags_plain}F"
+        flags=$(printf '%-5.5s' "$flags_plain")
+        flags="${flags//R/${C_GRN}R${C_RST}}"
+        flags="${flags//O/${C_YEL}O${C_RST}}"
+        flags="${flags//F/${C_CYN}F${C_RST}}"
+        # ball with you (they spoke last) -> bold; waiting on them -> dim
+        if [ "$lastauthor" != "$ME" ]; then who="${C_BLD}${who}${C_RST}"; else who="${C_DIM}${who}${C_RST}"; fi
+        excerpt=$(echo "$body" | sed 's/  */ /g' | head -c "${PR_THREADS_EXCERPT:-70}")
+        printf '%-3s \e]8;;%s\e\\%s\e]8;;\e\\ %-4s %s %s %s%s%s\n' \
+            "$COUNT" "$url" "$where" "${age}d" "$who" "$flags" \
+            "$C_DIM" "$excerpt" "$C_RST"
+    else
+        marks=""
+        [ "$resolved" = "true" ] && marks="$marks[resolved] "
+        [ "$outdated" = "true" ] && marks="$marks[outdated] "
+        [ "$filechanged" = true ] && marks="$marks[file-changed-since] "
+        printf '%s:%s  (%sd old)  %s -> last: %s @ %s\n' \
+            "$path" "$lineno" "$age" "$author" "$lastauthor" "${lastdate:0:10}"
+        printf '    %s%s\n' "$marks" "$(echo "$body" | head -c 140 | tr '\n' ' ')"
+        printf '    %s\n' "$url"
+    fi
+done < <(jq -r '
+    .reviewThreads.nodes[]
+    | '"$JQSEL"'
+    | [ (.isResolved|tostring), (.isOutdated|tostring),
+        .path, (.line // "-" | tostring), (.originalLine // "-" | tostring),
+        .comments.nodes[0].author.login, .comments.nodes[0].createdAt,
+        .comments.nodes[-1].author.login, .comments.nodes[-1].createdAt,
+        (.comments.nodes[0].originalCommit.oid // "null"),
+        .comments.nodes[0].url,
+        (.comments.nodes[0].bodyText | gsub("\t"; " ") | gsub("\n"; " "))
+      ] | @tsv' <<<"$DATA")
+
+[ "$COUNT" -eq 0 ] && echo "no unresolved threads on #$PR"
+exit 0

@@ -1,0 +1,325 @@
+#!/usr/bin/env bash
+# pr-draft — write into a PR's GitHub *pending* (draft) review.
+#
+# A pending review is GitHub's own draft surface: comments in it are visible
+# only to you until the review is submitted, and they stay freely editable and
+# deletable until then. So drafting is cheap and safe, and exactly two verbs
+# here become visible to other people — `submit` and `resolve`. Those two
+# refuse to act without `--yes`.
+#
+# Usage:
+#   pr-draft show <pr>                     the pending review, its comments, and
+#                                          the PR's threads — all with ids
+#   pr-draft comment <pr> <path> <line>    add a pending inline comment
+#   pr-draft comment <pr> <path> --file    ... anchored to the whole file
+#   pr-draft reply <pr> <thread-id>        add a pending reply in an open thread
+#   pr-draft body <pr>                     set the pending review's body text
+#   pr-draft edit <comment-id>             rewrite a pending comment
+#   pr-draft drop <comment-id>             delete a pending comment
+#   pr-draft submit <pr> --event <e>       PUBLIC: submit the review
+#   pr-draft resolve <thread-id>           PUBLIC: resolve a thread
+#
+# Comment/reply/body text is read from stdin, so multi-line markdown needs no
+# quoting:
+#
+#   pr-draft comment 61 src/lib.rs 42 <<'EOF'
+#   issue: this overflows for inputs above 2^31.
+#   EOF
+#
+# <pr> is a number or a PR URL. Ids come from `pr-draft show` (comment ids and
+# thread ids) or `pr-threads` (thread ids).
+#
+# Options:
+#   --file            with `comment`: anchor to the file, not a line. Use for a
+#                     finding with no single line, and for one whose line is not
+#                     part of the diff (GitHub only accepts line comments on
+#                     lines the diff touches).
+#   --side LEFT       comment on the pre-image line instead of the post-image
+#                     one (default RIGHT).
+#   --start <line>    with `comment`: start of a multi-line range ending at
+#                     <line>.
+#   --event <e>       with `submit`: COMMENT | APPROVE | REQUEST_CHANGES.
+#                     Required. You cannot APPROVE or REQUEST_CHANGES your own
+#                     PR — as the author, submitting replies uses COMMENT.
+#   --reason <r>      with `resolve`: ADDRESSED | WONT_FIX | INVALID.
+#   --yes             required by `submit` and `resolve`; without it they print
+#                     what they would do and exit without doing it.
+#   -h, --help        this text
+#
+# The pending review is created on first write and reused after that: GitHub
+# allows one per user per PR, so a second would be rejected. `show` never
+# creates one.
+#
+# shellcheck disable=SC2016  # $vars in the queries are GraphQL, not shell
+set -euo pipefail
+
+die()  { echo "pr-draft: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null || die "missing dependency: $1"; }
+usage() { sed -n '2,${/^#/!q; /^# shellcheck/d; s/^# \{0,1\}//; s/^#$//; p;}' "$0"; }
+need gh; need jq
+
+# ----------------------------------------------------------------- arguments
+POS=(); SUBJECT="line"; SIDE=RIGHT; START=""; EVENT=""; REASON=""; YES=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)  usage; exit 0 ;;
+        --file)     SUBJECT="file"; shift ;;
+        --side)     [ $# -ge 2 ] || die "--side needs LEFT or RIGHT"
+                    SIDE=$2; shift 2 ;;
+        --start)    [ $# -ge 2 ] || die "--start needs a line number"
+                    START=$2; shift 2 ;;
+        --event)    [ $# -ge 2 ] || die "--event needs COMMENT, APPROVE or REQUEST_CHANGES"
+                    EVENT=$2; shift 2 ;;
+        --reason)   [ $# -ge 2 ] || die "--reason needs ADDRESSED, WONT_FIX or INVALID"
+                    REASON=$2; shift 2 ;;
+        --yes)      YES=1; shift ;;
+        -*)         die "unknown option: $1 (see --help)" ;;
+        *)          POS+=("$1"); shift ;;
+    esac
+done
+[ ${#POS[@]} -ge 1 ] || { usage; exit 1; }
+
+CMD=${POS[0]}
+case "$SIDE" in LEFT|RIGHT) ;; *) die "--side must be LEFT or RIGHT, got '$SIDE'";; esac
+
+# Read the body from stdin for the verbs that carry text. Never prompt: an
+# interactive read would hang in an agent shell.
+read_body() {
+    [ -t 0 ] && die "$CMD reads its text from stdin, e.g. pr-draft $CMD ... <<'EOF' ... EOF"
+    BODY=$(cat)
+    [ -n "${BODY//[[:space:]]/}" ] || die "empty body on stdin — nothing to write"
+}
+
+# ------------------------------------------------------------------- context
+REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+OWNER=${REPO%/*}; NAME=${REPO#*/}
+
+pr_number() {
+    local p=$1
+    case "$p" in *github.com*/pull/*) p=${p##*/pull/}; p=${p%%[^0-9]*} ;; esac
+    case "$p" in ""|*[!0-9]*) die "bad PR number: '$1'" ;; esac
+    echo "$p"
+}
+
+# PR node id, head sha, and my pending review (if any) in one round trip.
+# A pending review belonging to someone else is invisible to us, so filtering
+# on state PENDING already narrows this to our own.
+load_pr() {
+    PR=$(pr_number "$1")
+    PRJSON=$(gh api graphql -f query='query($o:String!,$n:String!,$pr:Int!){
+      repository(owner:$o,name:$n){ pullRequest(number:$pr){
+        id number url headRefOid
+        reviews(last:20, states:[PENDING]){ nodes{ id url body } }
+      } } }' -f o="$OWNER" -f n="$NAME" -F pr="$PR" \
+      --jq '.data.repository.pullRequest') || die "cannot read PR #$PR in $REPO"
+    [ "$(jq -r 'if . == null then "null" else "ok" end' <<<"$PRJSON")" = ok ] \
+        || die "PR #$PR not found in $REPO"
+    PRID=$(jq -r .id <<<"$PRJSON")
+    HEAD_OID=$(jq -r .headRefOid <<<"$PRJSON")
+    PR_URL=$(jq -r .url <<<"$PRJSON")
+    RID=$(jq -r '.reviews.nodes[0].id // ""' <<<"$PRJSON")
+    RURL=$(jq -r '.reviews.nodes[0].url // ""' <<<"$PRJSON")
+}
+
+# Create the pending review only when a write needs one. Pinning commitOID
+# keeps the comments anchored to the head we actually reviewed.
+ensure_review() {
+    [ -z "$RID" ] || return 0
+    RID=$(gh api graphql -f query='mutation($pr:ID!,$oid:GitObjectID!){
+      addPullRequestReview(input:{pullRequestId:$pr, commitOID:$oid}){
+        pullRequestReview{ id url } } }' \
+      -f pr="$PRID" -f oid="$HEAD_OID" \
+      --jq '.data.addPullRequestReview.pullRequestReview.id') \
+      || die "could not create a pending review on #$PR"
+    echo "pr-draft: started a pending review on #$PR" >&2
+}
+
+# --------------------------------------------------------------------- verbs
+case "$CMD" in
+
+show)
+    [ ${#POS[@]} -ge 2 ] || die "usage: pr-draft show <pr>"
+    load_pr "${POS[1]}"
+    echo "PR #$PR  $PR_URL  head ${HEAD_OID:0:8}"
+    if [ -z "$RID" ]; then
+        echo "pending review: none"
+    else
+        echo "pending review: $RID"
+        [ -n "$RURL" ] && echo "                $RURL"
+        BODYTEXT=$(jq -r '.reviews.nodes[0].body // ""' <<<"$PRJSON")
+        [ -n "$BODYTEXT" ] && { echo "body:"; awk '{print "  | " $0}' <<<"$BODYTEXT"; }
+        echo
+        echo "pending comments (id  path:line  first line):"
+        gh api graphql -f query='query($rid:ID!){ node(id:$rid){
+          ... on PullRequestReview { comments(first:100){ nodes{
+            id path line originalLine state body } } } } }' -f rid="$RID" \
+          --jq '.data.node.comments.nodes[]
+                | "  \(.id)  \(.path):\(.line // .originalLine // "file")  \(.body|split("\n")[0])"' \
+          || echo "  (could not read them)"
+    fi
+    echo
+    echo "threads (id  path:line  resolved  last-author):"
+    gh api graphql -f query='query($o:String!,$n:String!,$pr:Int!){
+      repository(owner:$o,name:$n){ pullRequest(number:$pr){
+        reviewThreads(first:100){ nodes{ id path line isResolved isOutdated
+          comments(last:1){ nodes{ author{login} } } } } } } }' \
+      -f o="$OWNER" -f n="$NAME" -F pr="$PR" \
+      --jq '.data.repository.pullRequest.reviewThreads.nodes[]
+            | "  \(.id)  \(.path):\(.line // "?")  \(if .isResolved then "resolved" else "OPEN" end)\(if .isOutdated then ",outdated" else "" end)  \(.comments.nodes[0].author.login // "?")"'
+    ;;
+
+comment)
+    if [ "$SUBJECT" = file ]; then
+        [ ${#POS[@]} -ge 3 ] || die "usage: pr-draft comment <pr> <path> --file"
+    else
+        [ ${#POS[@]} -ge 4 ] || die "usage: pr-draft comment <pr> <path> <line>"
+    fi
+    PATH_ARG=${POS[2]}
+    if [ "$SUBJECT" != file ]; then
+        LINE=${POS[3]}
+        case "$LINE" in ""|*[!0-9]*) die "line must be a number, got '$LINE'";; esac
+        if [ -n "$START" ]; then
+            case "$START" in ""|*[!0-9]*) die "--start must be a number, got '$START'";; esac
+            [ "$START" -le "$LINE" ] || die "--start $START is after the end line $LINE"
+        fi
+    fi
+    read_body
+    load_pr "${POS[1]}"
+    ensure_review
+    if [ "$SUBJECT" = file ]; then
+        OUT=$(gh api graphql -f query='mutation($rid:ID!,$path:String!,$body:String!){
+          addPullRequestReviewThread(input:{pullRequestReviewId:$rid, path:$path,
+            body:$body, subjectType:FILE}){ thread{ id } } }' \
+          -f rid="$RID" -f path="$PATH_ARG" -f body="$BODY" \
+          --jq '.data.addPullRequestReviewThread.thread.id' 2>&1) \
+          || die "could not add a file comment on $PATH_ARG: $OUT"
+        echo "drafted (file) $PATH_ARG  thread $OUT"
+    else
+        if [ -n "$START" ]; then
+            OUT=$(gh api graphql -f query='mutation($rid:ID!,$path:String!,$line:Int!,$start:Int!,$side:DiffSide!,$body:String!){
+              addPullRequestReviewThread(input:{pullRequestReviewId:$rid, path:$path,
+                line:$line, startLine:$start, side:$side, startSide:$side,
+                body:$body, subjectType:LINE}){ thread{ id } } }' \
+              -f rid="$RID" -f path="$PATH_ARG" -F line="$LINE" -F start="$START" \
+              -f side="$SIDE" -f body="$BODY" \
+              --jq '.data.addPullRequestReviewThread.thread.id' 2>&1) || OUT="ERR:$OUT"
+        else
+            OUT=$(gh api graphql -f query='mutation($rid:ID!,$path:String!,$line:Int!,$side:DiffSide!,$body:String!){
+              addPullRequestReviewThread(input:{pullRequestReviewId:$rid, path:$path,
+                line:$line, side:$side, body:$body, subjectType:LINE}){ thread{ id } } }' \
+              -f rid="$RID" -f path="$PATH_ARG" -F line="$LINE" -f side="$SIDE" -f body="$BODY" \
+              --jq '.data.addPullRequestReviewThread.thread.id' 2>&1) || OUT="ERR:$OUT"
+        fi
+        if [ "${OUT#ERR:}" != "$OUT" ]; then
+            echo "pr-draft: could not anchor a comment to $PATH_ARG:$LINE" >&2
+            echo "${OUT#ERR:}" >&2
+            die "GitHub only accepts line comments on lines the diff touches — retry with --file to anchor this finding to the file instead"
+        fi
+        echo "drafted $PATH_ARG:$LINE ($SIDE)  thread $OUT"
+    fi
+    ;;
+
+reply)
+    [ ${#POS[@]} -ge 3 ] || die "usage: pr-draft reply <pr> <thread-id>"
+    THREAD=${POS[2]}
+    read_body
+    load_pr "${POS[1]}"
+    ensure_review
+    OUT=$(gh api graphql -f query='mutation($rid:ID!,$tid:ID!,$body:String!){
+      addPullRequestReviewThreadReply(input:{pullRequestReviewId:$rid,
+        pullRequestReviewThreadId:$tid, body:$body}){ comment{ id } } }' \
+      -f rid="$RID" -f tid="$THREAD" -f body="$BODY" \
+      --jq '.data.addPullRequestReviewThreadReply.comment.id' 2>&1) \
+      || die "could not draft a reply in thread $THREAD: $OUT"
+    echo "drafted reply in $THREAD  comment $OUT"
+    ;;
+
+body)
+    [ ${#POS[@]} -ge 2 ] || die "usage: pr-draft body <pr>"
+    read_body
+    load_pr "${POS[1]}"
+    ensure_review
+    gh api graphql -f query='mutation($rid:ID!,$body:String!){
+      updatePullRequestReview(input:{pullRequestReviewId:$rid, body:$body}){
+        pullRequestReview{ id } } }' \
+      -f rid="$RID" -f body="$BODY" --jq '.data.updatePullRequestReview.pullRequestReview.id' \
+      >/dev/null || die "could not set the review body on #$PR"
+    echo "set the pending review body on #$PR"
+    ;;
+
+edit)
+    [ ${#POS[@]} -ge 2 ] || die "usage: pr-draft edit <comment-id>"
+    CID=${POS[1]}
+    read_body
+    gh api graphql -f query='mutation($cid:ID!,$body:String!){
+      updatePullRequestReviewComment(input:{pullRequestReviewCommentId:$cid,
+        body:$body}){ pullRequestReviewComment{ id state } } }' \
+      -f cid="$CID" -f body="$BODY" \
+      --jq '"rewrote \(.data.updatePullRequestReviewComment.pullRequestReviewComment.id) (\(.data.updatePullRequestReviewComment.pullRequestReviewComment.state))"' \
+      || die "could not rewrite comment $CID"
+    ;;
+
+drop)
+    [ ${#POS[@]} -ge 2 ] || die "usage: pr-draft drop <comment-id>"
+    CID=${POS[1]}
+    gh api graphql -f query='mutation($cid:ID!){
+      deletePullRequestReviewComment(input:{id:$cid}){ clientMutationId } }' \
+      -f cid="$CID" >/dev/null || die "could not delete comment $CID"
+    echo "deleted $CID"
+    ;;
+
+submit)
+    [ ${#POS[@]} -ge 2 ] || die "usage: pr-draft submit <pr> --event <e> --yes"
+    case "$EVENT" in
+        COMMENT|APPROVE|REQUEST_CHANGES) ;;
+        "") die "submit needs --event COMMENT, APPROVE or REQUEST_CHANGES" ;;
+        *)  die "--event must be COMMENT, APPROVE or REQUEST_CHANGES, got '$EVENT'" ;;
+    esac
+    load_pr "${POS[1]}"
+    [ -n "$RID" ] || die "no pending review on #$PR — nothing to submit"
+    COUNT=$(gh api graphql -f query='query($rid:ID!){ node(id:$rid){
+      ... on PullRequestReview { comments(first:100){ totalCount } } } }' \
+      -f rid="$RID" --jq '.data.node.comments.totalCount')
+    if [ "$YES" != 1 ]; then
+        echo "would submit review $RID on #$PR as $EVENT"
+        echo "  $COUNT comment(s) would become visible to everyone on $PR_URL"
+        echo "  this cannot be undone — re-run with --yes to do it"
+        exit 0
+    fi
+    gh api graphql -f query='mutation($rid:ID!,$e:PullRequestReviewEvent!){
+      submitPullRequestReview(input:{pullRequestReviewId:$rid, event:$e}){
+        pullRequestReview{ url state } } }' \
+      -f rid="$RID" -f e="$EVENT" \
+      --jq '"submitted \(.data.submitPullRequestReview.pullRequestReview.state): \(.data.submitPullRequestReview.pullRequestReview.url)"' \
+      || die "submit failed — the pending review is still pending; re-read it with 'pr-draft show $PR' before retrying"
+    ;;
+
+resolve)
+    [ ${#POS[@]} -ge 2 ] || die "usage: pr-draft resolve <thread-id> --yes"
+    THREAD=${POS[1]}
+    case "$REASON" in
+        ADDRESSED|WONT_FIX|INVALID|"") ;;
+        *) die "--reason must be ADDRESSED, WONT_FIX or INVALID, got '$REASON'" ;;
+    esac
+    if [ "$YES" != 1 ]; then
+        echo "would resolve thread $THREAD${REASON:+ as $REASON}"
+        echo "  resolving is immediately visible to everyone — re-run with --yes"
+        exit 0
+    fi
+    if [ -n "$REASON" ]; then
+        gh api graphql -f query='mutation($tid:ID!,$r:PullRequestReviewThreadResolutionReason!){
+          resolveReviewThread(input:{threadId:$tid, resolutionReason:$r}){
+            thread{ id isResolved } } }' -f tid="$THREAD" -f r="$REASON" >/dev/null \
+          || die "could not resolve $THREAD"
+    else
+        gh api graphql -f query='mutation($tid:ID!){
+          resolveReviewThread(input:{threadId:$tid}){ thread{ id isResolved } } }' \
+          -f tid="$THREAD" >/dev/null || die "could not resolve $THREAD"
+    fi
+    echo "resolved $THREAD${REASON:+ ($REASON)}"
+    ;;
+
+*)
+    die "unknown command: $CMD (see --help)"
+    ;;
+esac
