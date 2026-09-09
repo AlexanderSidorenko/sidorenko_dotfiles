@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# pr-help — terse map of the pr-* review workflow: which skill does what, which
+# script does what, and the order they run in.
+#
+# Usage: pr-help [--no-color]
+#
+# This is the family's front door. The long-form contract lives in
+# claude/skills/pr-references/, and each skill's own SKILL.md has the detail.
+set -euo pipefail
+
+case "${1:-}" in
+    -h|--help) sed -n '2,${/^#/!q; s/^# \{0,1\}//; s/^#$//; p;}' "$0"; exit 0 ;;
+    --no-color) NOCOLOR=1 ;;
+    "") NOCOLOR=0 ;;
+    *) echo "pr-help: unknown option: $1 (try --help)" >&2; exit 1 ;;
+esac
+
+if [ -t 1 ] && [ "${NOCOLOR:-0}" != 1 ]; then
+    B=$'\e[1m'; D=$'\e[2m'; C=$'\e[36m'; Y=$'\e[33m'; R=$'\e[0m'
+else
+    B=""; D=""; C=""; Y=""; R=""
+fi
+
+cat <<EOF
+${B}pr-* — GitHub review workflow${R}
+${D}Every comment drafts into the PR's GitHub pending review. Nobody else can see
+it, and it stays editable, until you submit. Drafting is free; publishing is not.${R}
+
+${B}LIFECYCLE${R}
+                  ${C}/pr-statuses${R}  ${D}whose move is it? — start here${R}
+                        │
+         ┌──────────────┴──────────────┐
+    ${Y}as reviewer${R}                    ${Y}as author${R}
+         │                             │
+  ${C}/pr-checkout${R}  ${D}orient${R}          ${C}/pr-comment-sweep${R}
+  ${C}/pr-review${R}    ${D}draft findings${R}    ${D}decode what they want,${R}
+         │                       ${D}prototype it, draft replies${R}
+         │                             │
+         └──── ${B}pending review on GitHub${R} ────┘
+               ${D}curate in the browser, or tell me to edit it${R}
+                        │
+                  ${C}/pr-publish${R}  ${D}verdict → submit → resolve${R}
+                               ${D}the only step anyone else sees${R}
+
+${B}SKILLS${R}
+  ${C}/pr-statuses${R}          ${D}"where do my PRs stand", "anything waiting on me".${R}
+                        ${D}Read-only. Also catches drafts you forgot to submit.${R}
+  ${C}/pr-checkout${R} <n>      ${D}Get set up on a PR and briefed. No review, no writes.${R}
+  ${C}/pr-review${R} <n>        ${D}Deep pass; every finding becomes a pending comment.${R}
+                        ${D}Re-run it on a new push — it diffs since last time.${R}
+  ${C}/pr-comment-sweep${R} <n> ${D}Work the open threads, whichever side you're on:${R}
+                        ${D}what are they really asking, does their idea work.${R}
+  ${C}/pr-publish${R}           ${D}Submit the draft, then resolve what it addressed.${R}
+  ${C}/pr-restack${R}           ${D}Propagate an edit up a stacked-PR chain.${R}
+
+${B}SCRIPTS${R} ${D}(the mechanics; skills call these, and so can you)${R}
+  ${C}pr-prep${R} <n>           ${D}Refuse-or-clean preflight, then check out.${R}
+  ${C}pr-draft${R} <verb>       ${D}Every write to the pending review: show, comment,${R}
+                        ${D}reply, edit, drop, body, submit, resolve.${R}
+  ${C}pr-diff${R} <n>           ${D}Diff pushed iterations, rebase-aware.${R}
+                        ${D}'last' = the commit you last reviewed at.${R}
+  ${C}pr-threads${R} <n>        ${D}Unresolved threads + outdated / file-changed flags.${R}
+
+${B}THE RULES THAT MATTER${R}
+  ${D}·${R} Drafting needs no approval — a pending comment is invisible to everyone
+    but you, and deleting one costs nothing.
+  ${D}·${R} ${Y}Submitting and resolving are the only public acts${R}, and neither can be
+    undone. Both wait for you to say go.
+  ${D}·${R} ${C}pr-prep${R} refuses rather than clobbers: an unpushed commit, an edit it
+    can't account for, or a PR that isn't in this repo stops it dead.
+  ${D}·${R} A forgotten draft looks to everyone else like you never reviewed.
+    ${C}/pr-statuses${R} is what catches it.
+EOF

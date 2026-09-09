@@ -15,6 +15,7 @@ doesn't decay when context is compacted:
 
 | Script | Role |
 |---|---|
+| `pr-help` | terse map of the whole family — the front door, for humans |
 | `pr-draft` | every write to a pending review — the only thing that talks to the review API |
 | `pr-prep` | self-cleaning preflight: refuses on real work, clears review residue, checks out |
 | `pr-diff` | iterations of a PR, rebase-aware; `last` = your review baseline |
