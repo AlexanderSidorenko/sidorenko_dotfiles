@@ -16,6 +16,7 @@ ripgreprc           — global rg flags
 tigrc               — tig config
 mc.keymap           — Midnight Commander keymap
 alacritty/          — Alacritty terminal config (TOML; alacritty itself installed manually)
+firefox/            — user.js, copied into every Firefox profile (never symlinked)
 nvim/               — Neovim config (LazyVim-based, Lua)
 ranger/             — ranger file manager config
 claude/             — Claude Code config (settings.json, CLAUDE.md, skills/; symlinked into ~/.claude)
@@ -91,6 +92,12 @@ shellcheck bin/lib/meminfo.sh    # has a `shell=bash` directive, no shebang
   scan roots, private paths — tracked content in a public repo. Per-machine
   values belong in the live copy only, like `~/.bashrc.local` and
   `~/.claude/CLAUDE.machine.md`.
+- A config consumed by a **snap** must be copied too, for a different reason:
+  snapd's `home` interface grants no access to dot-directories in `$HOME`, so a
+  symlink into `~/.sidorenko_dotfiles` is denied by AppArmor and the app starts
+  as if the file were absent, silently. `install.sh:install_firefox_prefs` is
+  the worked example — it also has to place its file once per Firefox profile,
+  since `user.js` is only read from inside a profile directory.
 - `~/.bashrc.local` is sourced last for machine-specific overrides not tracked in this repo.
 - Claude Code instructions are tiered: `claude/CLAUDE.md` (tracked, symlinked to
   `~/.claude/CLAUDE.md`) holds global-all-machines content and ends by importing

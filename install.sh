@@ -483,6 +483,53 @@ install_gitpane() {
   log "  Add this machine's scan roots there; it is never overwritten again."
 }
 
+install_firefox_prefs() {
+  # Firefox reads user.js from inside each profile, so this has to be placed
+  # once per profile rather than pointed at from one place.
+  #
+  # Copied, never symlinked. The Firefox snap runs under AppArmor with snapd's
+  # `home` interface, which deliberately grants no access to dot-directories in
+  # $HOME. A link into ~/.sidorenko_dotfiles resolves to exactly such a path,
+  # the read is denied, and Firefox starts with the prefs silently absent --
+  # the worst failure mode available, since nothing reports it.
+  #
+  # Unlike install_gitpane this is a managed file and not a seed: Firefox reads
+  # user.js and writes prefs.js, so it never edits this copy and overwriting it
+  # can't destroy in-app preferences.
+  local src="${DOTDIR}/firefox/user.js"
+  local -a profile_roots=(
+    "${HOME}/snap/firefox/common/.mozilla/firefox" # Ubuntu snap
+    "${HOME}/.mozilla/firefox"                     # deb / tarball
+    "${HOME}/Library/Application Support/Firefox/Profiles" # macOS
+  )
+  local root profile dest found=0
+
+  [[ -e "$src" ]] || die "Missing Firefox prefs: $(name "$src")"
+
+  for root in "${profile_roots[@]}"; do
+    [[ -d "$root" ]] || continue
+    for profile in "$root"/*/; do
+      # prefs.js is what makes a directory a profile Firefox has actually
+      # used; the roots also hold caches and lock files that are not profiles.
+      [[ -f "${profile}prefs.js" ]] || continue
+      found=1
+      dest="${profile}user.js"
+      if [[ -f "$dest" ]] && cmp -s "$src" "$dest"; then
+        log "Firefox prefs already current: $(name "$dest")"
+        continue
+      fi
+      cp -f "$src" "$dest"
+      log "Installed Firefox prefs: $(name "$dest")"
+    done
+  done
+
+  if ((found)); then
+    log "  Restart Firefox for these to take effect."
+  else
+    log "No Firefox profiles found; skipping prefs."
+  fi
+}
+
 install_ssh_config() {
   local src="${DOTDIR}/ssh_config"
   local user_ssh_dir="${HOME}/.ssh"
@@ -1194,6 +1241,11 @@ main() {
   install_ranger
   install_mc_keymap
   install_gitpane
+  if has_gui; then
+    install_firefox_prefs
+  else
+    log "Skipping Firefox prefs (headless)"
+  fi
   install_alacritty
   install_tmux
   install_claude
