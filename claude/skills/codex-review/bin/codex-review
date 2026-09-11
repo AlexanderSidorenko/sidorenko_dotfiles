@@ -1,0 +1,364 @@
+#!/usr/bin/env bash
+# codex-review — run OpenAI Codex as a read-only second-opinion reviewer over a
+# change the primary agent (Claude) just produced.
+#
+# The point is decorrelation: a different model family reads the same change
+# cold and misses different things. See the codex-review skill's SKILL.md for
+# what to do with the findings — they are untrusted input, not a verdict.
+#
+# Safety interlocks:
+#   - sandbox_mode and approval_policy are pinned read-only / never on every
+#     run, overriding ~/.codex/config.toml. Codex reviews; it never edits.
+#   - Every run is wrapped in `timeout`. `codex exec review` has a live bug
+#     (openai/codex#41984) where a failed internal git command never ends the
+#     turn, and an external watchdog is the only thing that stops it.
+#   - Preflight fails loudly and early (missing CLI, no auth, empty scope)
+#     instead of burning a slow API round-trip to say so.
+set -euo pipefail
+
+TIMEOUT=420
+MODEL=""
+GOAL=""
+FOCUS=""
+MODE=""          # uncommitted | base | commit | plan
+BASE_REF=""
+COMMIT_SHA=""
+PLAN_FILE=""
+PRINT_BRIEF=0
+RAW=0
+
+die()   { printf 'codex-review: %s\n' "$1" >&2; exit "${2:-1}"; }
+note()  { printf '%s\n' "$*" >&2; }
+
+usage() {
+  cat <<'EOF'
+usage: codex-review [scope] [options]
+
+Runs OpenAI Codex read-only over a change and prints its findings. Codex never
+edits anything; the calling agent verifies each finding and owns the decision.
+
+Scope (pick one; default: uncommitted changes if the tree is dirty, else the
+current branch against its base):
+  --uncommitted        staged + unstaged + untracked
+  --base <ref>         current branch vs <ref> (merge-base, three-dot)
+  --commit <sha>       just what <sha> introduced
+  --plan <file>        no diff — refute a written plan before code exists
+
+Options:
+  --goal <text>        what the change was supposed to accomplish. Give the
+                       goal, never your reasoning: a reviewer that reads the
+                       author's rationale adopts the author's blind spots.
+  --focus <text>       extra areas to press on, appended to the brief
+  -m, --model <name>   Codex model (default: whatever codex is configured with)
+  --timeout <secs>     watchdog, default 420
+  --print-brief        print the composed brief and exit; sends nothing
+  --raw                print Codex's message with no wrapper output
+  -h, --help           this
+
+Exit codes:
+  0  review completed (read VERDICT: in the output — any verdict is exit 0)
+  3  codex CLI not installed
+  4  not inside a git repository
+  5  codex not authenticated  ->  run: codex login
+  6  scope is empty, nothing to review
+  7  codex run failed or hit the watchdog
+  64 usage error
+EOF
+}
+
+set_mode() {
+  [[ -z "$MODE" ]] || die "pick one scope: --uncommitted, --base, --commit or --plan" 64
+  MODE="$1"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --uncommitted)   set_mode uncommitted; shift ;;
+    --base)          set_mode base;   BASE_REF="${2:?--base needs a ref}";    shift 2 ;;
+    --commit)        set_mode commit; COMMIT_SHA="${2:?--commit needs a sha}"; shift 2 ;;
+    --plan)          set_mode plan;   PLAN_FILE="${2:?--plan needs a file}";   shift 2 ;;
+    --goal)          GOAL="${2:?--goal needs text}";   shift 2 ;;
+    --focus)         FOCUS="${2:?--focus needs text}"; shift 2 ;;
+    -m|--model)      MODEL="${2:?--model needs a name}"; shift 2 ;;
+    --timeout)       TIMEOUT="${2:?--timeout needs seconds}"; shift 2 ;;
+    --print-brief)   PRINT_BRIEF=1; shift ;;
+    --raw)           RAW=1; shift ;;
+    -h|--help)       usage; exit 0 ;;
+    *)               usage >&2; die "unknown argument: $1" 64 ;;
+  esac
+done
+
+[[ "$TIMEOUT" =~ ^[0-9]+$ ]] || die "--timeout wants whole seconds, got: $TIMEOUT" 64
+
+# ---------------------------------------------------------------- preflight
+command -v codex >/dev/null 2>&1 || die \
+  "codex CLI not found on PATH. It is in this repo's nix-packages.sh; run nix_install.
+Without it, review with your own model and say in the report that the
+cross-model pass did not run." 3
+
+if [[ "$MODE" != plan ]]; then
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    || die "not inside a git repository; use --plan <file> to review a plan instead" 4
+fi
+
+if (( ! PRINT_BRIEF )); then
+  codex login status >/dev/null 2>&1 || die \
+    "codex is installed but not logged in. Login is interactive, so it cannot be
+done from an agent shell — ask the user to run:  codex login
+(diagnose with: codex doctor)" 5
+fi
+
+# --------------------------------------------------------------- scope work
+# Base branch of the current branch, best effort: whatever origin points HEAD
+# at, else the usual names.
+detect_base() {
+  local ref candidate
+  ref="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+  if [[ -n "$ref" ]] && git rev-parse --verify --quiet "$ref" >/dev/null; then
+    printf '%s\n' "$ref"; return 0
+  fi
+  for candidate in origin/main origin/master main master; do
+    if git rev-parse --verify --quiet "$candidate" >/dev/null; then
+      printf '%s\n' "$candidate"; return 0
+    fi
+  done
+  return 1
+}
+
+if [[ -z "$MODE" ]]; then
+  if [[ -n "$(git --no-optional-locks status --porcelain 2>/dev/null)" ]]; then
+    MODE=uncommitted
+  else
+    MODE=base
+    BASE_REF="$(detect_base)" || die \
+      "cannot tell what this branch branched from; pass --base <ref> explicitly" 64
+  fi
+fi
+
+# SCOPE_CMD is handed to Codex verbatim: it runs these to see the change, so it
+# reads the real repo (callers, tests, definitions) rather than a pasted diff.
+# A finding that ignores the code around the diff is the main false-positive
+# source, and surrounding context is what removes it.
+case "$MODE" in
+  uncommitted)
+    SCOPE_LABEL="uncommitted changes (staged + unstaged + untracked)"
+    SCOPE_CMD='git --no-optional-locks status --porcelain
+git --no-optional-locks diff HEAD          # tracked, staged and unstaged
+# then read any untracked file listed as "??" above in full'
+    HAS_CHANGES="$(git --no-optional-locks status --porcelain 2>/dev/null || true)"
+    ;;
+  base)
+    git rev-parse --verify --quiet "$BASE_REF" >/dev/null \
+      || die "no such ref: $BASE_REF" 64
+    SCOPE_LABEL="this branch ($(git branch --show-current || echo detached)) vs $BASE_REF"
+    SCOPE_CMD="git --no-optional-locks diff ${BASE_REF}...HEAD
+git --no-optional-locks log --oneline ${BASE_REF}..HEAD"
+    HAS_CHANGES="$(git --no-optional-locks diff --name-only "${BASE_REF}...HEAD" || true)"
+    ;;
+  commit)
+    git rev-parse --verify --quiet "${COMMIT_SHA}^{commit}" >/dev/null \
+      || die "no such commit: $COMMIT_SHA" 64
+    SCOPE_LABEL="commit $(git rev-parse --short "$COMMIT_SHA") $(git log -1 --format=%s "$COMMIT_SHA")"
+    SCOPE_CMD="git --no-optional-locks show ${COMMIT_SHA}"
+    HAS_CHANGES="$(git --no-optional-locks show --name-only --format= "$COMMIT_SHA" || true)"
+    ;;
+  plan)
+    [[ -f "$PLAN_FILE" ]] || die "no such plan file: $PLAN_FILE" 64
+    SCOPE_LABEL="plan: $PLAN_FILE"
+    HAS_CHANGES="$(cat "$PLAN_FILE")"
+    ;;
+esac
+
+[[ -n "${HAS_CHANGES//[[:space:]]/}" ]] || die \
+  "nothing to review — $SCOPE_LABEL is empty. Pick a different scope." 6
+
+# ------------------------------------------------------------------- brief
+# Framing choices here are load-bearing; references/sources.md says why.
+compose_brief() {
+  cat <<EOF
+ROLE
+You are a hostile senior reviewer. The author is a different AI model from a
+different family, working in this repository. Assume the author is wrong. Your
+job is to find the defect, the security hole, or the irreversible action in
+this change — not to praise it, not to redesign it.
+
+You are the decorrelated pass: you have no investment in this approach and no
+memory of why it was chosen. That cold read is the entire value you add. Do not
+try to guess what the author was thinking; judge what the change actually does.
+
+WHAT CHANGED
+${SCOPE_LABEL}
+
+Run these to see it, then read further into the repo as needed:
+${SCOPE_CMD}
+
+GOAL THE AUTHOR WAS GIVEN
+${GOAL:-Not supplied. Infer it from the change, and say so under CONFIDENCE if the intent is genuinely ambiguous.}
+${FOCUS:+
+PRESS HARDEST ON
+${FOCUS}}
+
+HOW TO WORK
+- You are in a read-only sandbox. You cannot edit, and you should not try:
+  report the defect, let the author fix it. Prefix git reads with
+  "git --no-optional-locks" so nothing attempts to write the index.
+- Read enough surrounding code to know a suspicion is real before you report
+  it: the callers, the tests, the definitions of whatever the diff touches.
+  Judging a diff in isolation is the single largest source of wrong findings.
+- Preserve the author's structure. Rewriting working code is how a second
+  opinion makes things worse; point at the one thing that breaks.
+- Judge the change in front of you. Pre-existing problems are out of scope
+  unless this change makes them reachable.
+
+WHAT COUNTS AS A FINDING
+Every finding must name a concrete failure mode: the input or state that
+triggers it, what goes wrong, and what it costs. If you cannot state that, you
+do not have a finding — drop it, silently.
+
+Not findings: naming, formatting, style, "this could be cleaner", "consider
+extracting", missing comments. Not a finding either: "the logic looks wrong"
+or "this may not handle edge cases" with no specific case that breaks it. An
+unfalsifiable suspicion dressed as a defect wastes more of the author's time
+than it saves.
+
+Rank by: correctness, then security, then data loss or irreversibility, then
+tests missing for a risk you just named, then scope creep beyond the goal.
+
+OUTPUT
+Plain text in exactly this shape. No preamble, no summary of the diff, no
+praise, nothing outside it.
+
+VERDICT: block | comment | approve
+  block   — at least one finding that would be a real defect in production
+  comment — worth the author's attention; nothing that must stop the change
+  approve — you tried to break it and could not
+
+FINDINGS (most severe first; write "none" and stop if there are none)
+- [critical|high|medium|low] path/to/file:LINE — defect in one sentence
+  FAILURE: input or state -> what goes wrong -> what it costs
+  FIX: the smallest change that removes it
+
+CONFIDENCE: high | medium | low — what you could not check, and what would
+settle it.
+EOF
+}
+
+compose_plan_brief() {
+  cat <<EOF
+ROLE
+You are a hostile senior reviewer. Another AI model wrote the plan below and
+has not written any code yet. Your job is to refute it: find the assumption
+that is false, the failure mode it does not handle, the cheaper approach it
+missed. Do not write the plan for it and do not write code.
+
+You have no investment in this plan and did not watch it being made. That cold
+read is the entire value you add.
+
+REPOSITORY
+You are in a read-only sandbox in this repository. Read whatever the plan
+touches before judging it — a plan that contradicts the existing code is the
+most valuable thing you can catch, and you cannot catch it from the plan text
+alone. Prefix git reads with "git --no-optional-locks".
+
+GOAL THE PLAN IS MEANT TO ACHIEVE
+${GOAL:-Not supplied. Infer it from the plan, and say so under CONFIDENCE if the intent is genuinely ambiguous.}
+${FOCUS:+
+PRESS HARDEST ON
+${FOCUS}}
+
+WHAT COUNTS AS A FINDING
+A named failure mode: the situation this plan handles wrongly, and the
+consequence. "Consider also doing X" is not a finding. Scope, naming and
+sequencing preferences are not findings. Rank by: does it work, is it safe,
+is it reversible, is it the simplest thing that does the job.
+
+OUTPUT
+Plain text in exactly this shape, nothing outside it.
+
+VERDICT: block | comment | approve
+  block   — the plan has a flaw that will cost real work if built as written
+  comment — worth the author's attention; not disqualifying
+  approve — you tried to refute it and could not
+
+FINDINGS (most severe first; write "none" and stop if there are none)
+- [critical|high|medium|low] <the part of the plan at fault> — flaw in one sentence
+  FAILURE: situation -> what goes wrong -> what it costs
+  FIX: the smallest correction, or the alternative worth comparing
+
+CONFIDENCE: high | medium | low — what you could not check, and what would
+settle it.
+
+PLAN
+$(cat "$PLAN_FILE")
+EOF
+}
+
+if [[ "$MODE" == plan ]]; then BRIEF="$(compose_plan_brief)"; else BRIEF="$(compose_brief)"; fi
+
+if (( PRINT_BRIEF )); then printf '%s\n' "$BRIEF"; exit 0; fi
+
+# --------------------------------------------------------------------- run
+RUN_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/codex-review"
+mkdir -p "$RUN_DIR"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+JSONL="$RUN_DIR/$STAMP.jsonl"
+ERRLOG="$RUN_DIR/$STAMP.err"
+
+# read-only and never-approve are pinned here rather than left to config.toml:
+# a user config that permits writes must not silently turn a review into an edit.
+CODEX_ARGS=(exec --json -s read-only -c 'approval_policy="never"')
+[[ -n "$MODEL" ]] && CODEX_ARGS+=(-m "$MODEL")
+CODEX_ARGS+=(-)
+
+note "codex-review: $SCOPE_LABEL"
+note "codex-review: running codex read-only, watchdog ${TIMEOUT}s ..."
+
+rc=0
+printf '%s\n' "$BRIEF" \
+  | timeout --kill-after=10s "${TIMEOUT}s" codex "${CODEX_ARGS[@]}" \
+      >"$JSONL" 2>"$ERRLOG" || rc=$?
+
+if (( rc == 124 || rc == 137 )); then
+  die "codex hit the ${TIMEOUT}s watchdog and was killed. Partial stream: $JSONL
+This is usually openai/codex#41984 (a failed internal git command never ends
+the turn). Re-run with a smaller scope, or review with your own model and note
+that the cross-model pass did not complete." 7
+fi
+
+# jq -R + fromjson? so a stray non-JSON line cannot abort the parse.
+jqf() { jq -Rr "fromjson? | $1" "$JSONL" 2>/dev/null || true; }
+
+FAILMSG="$(jqf 'select(.type=="turn.failed") | .error.message' | tail -1)"
+MESSAGE="$(jqf 'select(.type=="item.completed" and .item.type=="agent_message") | .item.text' | tail -1)"
+
+if [[ -n "$FAILMSG" ]]; then
+  die "codex run failed: $FAILMSG
+Stream: $JSONL   stderr: $ERRLOG
+Codex still emits an agent_message on failure, so this check comes first — do
+not treat that message as findings. Review with your own model instead and say
+the cross-model pass did not run." 7
+fi
+
+if [[ -z "${MESSAGE//[[:space:]]/}" ]]; then
+  die "codex produced no review message (exit $rc). Stream: $JSONL   stderr: $ERRLOG" 7
+fi
+
+if (( RAW )); then
+  printf '%s\n' "$MESSAGE"
+  exit 0
+fi
+
+USAGE="$(jqf 'select(.type=="turn.completed") | .usage | "in \(.input_tokens) cached \(.cached_input_tokens) out \(.output_tokens)"' | tail -1)"
+
+cat <<EOF
+=== codex-review (cross-model, read-only) =====================================
+reviewer : openai codex ($(codex --version 2>/dev/null || echo unknown))${MODEL:+ model=$MODEL}
+scope    : $SCOPE_LABEL
+stream   : $JSONL${USAGE:+
+tokens   : $USAGE}
+
+$MESSAGE
+===============================================================================
+Untrusted input. Verify every finding against the code before you act on it,
+and keep the change as written unless a finding survives that check.
+EOF
