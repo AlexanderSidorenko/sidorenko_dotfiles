@@ -1,0 +1,399 @@
+#!/usr/bin/env bash
+# sweep-branches — audit every branch line in a repo: which ones are redundant,
+# which hold work that exists nowhere else, and which local branches are not
+# tracking the remote branch they obviously should be.
+#
+# Usage:
+#   sweep-branches [options] [<repo-path>]
+#
+# Options:
+#   --base <ref>   compare against this ref instead of the repo's default
+#                  branch (auto: origin/HEAD, then origin/main|master, then a
+#                  local main|master)
+#   --local        consider local branches only (default: local + every
+#                  remote-tracking branch)
+#   --no-fetch     skip the `git fetch --all --prune` that runs first
+#   --limit <n>    stop patch-comparing a branch more than <n> commits ahead of
+#                  the base; it is listed as too-divergent instead (default 400)
+#   --no-color     plain output
+#   -h, --help     this text
+#
+# WHAT IT COMPARES
+#
+# Branch *lines*, not refs. `foo` and `origin/foo` are one line, and how far
+# apart they are is a tracking question answered in its own section — otherwise
+# every branch would report itself as a duplicate of its own upstream. A line is
+# judged by its fullest ref, so a local branch that is behind its remote is not
+# mistaken for the whole line.
+#
+# Two lines hold the same work when their commits above the base have the same
+# patch-ids. So a rebased, cherry-picked or reapplied copy still reads as the
+# same work — which `git branch --merged` cannot see, because it only knows
+# ancestry. Containment is that test one way: a line whose every patch also
+# lives on some other line carries nothing of its own, and is the thing worth
+# deleting.
+#
+# Read-only. It fetches — that is how "the upstream is gone" becomes knowable —
+# and it prints delete commands, but it never deletes a branch, local or remote.
+set -euo pipefail
+
+die()  { echo "sweep-branches: $*" >&2; exit 1; }
+warn() { echo "sweep-branches: $*" >&2; }
+usage() { sed -n '2,${/^#/!q; s/^# \{0,1\}//; p;}' "$0"; }
+
+BASE=""; LOCAL_ONLY=0; FETCH=1; LIMIT=400; COLOR=auto; REPO="."
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --base)      [ $# -ge 2 ] || die "--base needs a ref"; BASE=$2; shift 2 ;;
+        --base=*)    BASE=${1#--base=}; shift ;;
+        --local)     LOCAL_ONLY=1; shift ;;
+        --no-fetch)  FETCH=0; shift ;;
+        --limit)     [ $# -ge 2 ] || die "--limit needs a number"; LIMIT=$2; shift 2 ;;
+        --limit=*)   LIMIT=${1#--limit=}; shift ;;
+        --no-color)  COLOR=never; shift ;;
+        -h|--help)   usage; exit 0 ;;
+        -*)          die "unknown option: $1" ;;
+        *)           REPO=$1; shift ;;
+    esac
+done
+case "$LIMIT" in ''|*[!0-9]*) die "--limit wants a number, got: $LIMIT" ;; esac
+
+cd "$REPO" 2>/dev/null || die "no such directory: $REPO"
+git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repository: $PWD"
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+[ "$COLOR" = auto ] && { [ -t 1 ] && COLOR=always || COLOR=never; }
+
+# Field separator: US (0x1f). Tab cannot be used — it is IFS whitespace, so
+# bash's `read` collapses runs of it and an empty field (no upstream, no
+# subject) silently shifts every field after it.
+S=$'\x1f'
+
+REMOTES=$(git remote)
+if [ "$FETCH" = 1 ] && [ -n "$REMOTES" ]; then
+    warn "fetching…"
+    git fetch --all --prune --quiet || warn "fetch failed — working from stale remote-tracking refs"
+fi
+
+# -------------------------------------------------------------------- base
+[ -n "$BASE" ] || BASE=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+if [ -z "$BASE" ]; then
+    for cand in origin/main origin/master main master; do
+        git rev-parse --verify --quiet "$cand^{commit}" >/dev/null && { BASE=$cand; break; }
+    done
+fi
+[ -n "$BASE" ] || die "cannot work out the default branch — pass --base <ref>"
+BASE_SHA=$(git rev-parse --verify --quiet "$BASE^{commit}") || die "not a commit: $BASE"
+
+SCOPE=(refs/heads)
+[ "$LOCAL_ONLY" = 1 ] || SCOPE+=(refs/remotes)
+
+# Strip a leading "<remote>/" to get the branch line a ref belongs to.
+line_key() {
+    local ref=$1 r
+    for r in $REMOTES; do
+        case "$ref" in "$r"/*) printf '%s\n' "${ref#"$r"/}"; return ;; esac
+    done
+    printf '%s\n' "$ref"
+}
+BASE_KEY=$(line_key "$BASE")
+
+# Two calls, not one per branch: everything that is an ancestor of base / HEAD.
+MERGED_BASE=$(git for-each-ref --merged "$BASE" --format='%(refname:short)' "${SCOPE[@]}")
+MERGED_HEAD=$(git for-each-ref --merged HEAD --format='%(refname:short)' "${SCOPE[@]}" 2>/dev/null || true)
+WORKTREES=$(git worktree list --porcelain | sed -n 's|^branch refs/heads/||p')
+CURRENT=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+in_set() { printf '%s\n' "$2" | grep -qxF -- "$1"; }
+
+# "<ahead> <behind>" of $1 relative to $2.
+counts() { git rev-list --left-right --count "$1...$2" 2>/dev/null || echo "? ?"; }
+
+DATA=$(mktemp); trap 'rm -f "$DATA"' EXIT
+
+# The base's own recent commits, by patch-id. A branch that was rebase-merged has
+# its commits in the base under new shas; without this corpus every one of them
+# reads as unique work. Capped at --limit commits of base history.
+git -c diff.noprefix=false --no-pager \
+    log --no-ext-diff --no-textconv --no-merges --format='commit %H' --patch -n "$LIMIT" "$BASE" 2>/dev/null \
+  | git patch-id --stable \
+  | awk -v s="$S" '{print "B" s $1}' >>"$DATA"
+FMT="%(refname)%1f%(refname:short)%1f%(objectname)%1f%(upstream:short)%1f%(upstream:track)%1f%(committerdate:short)%1f%(contents:subject)"
+TOTAL=$(git for-each-ref --format='x' "${SCOPE[@]}" | wc -l)
+N=0
+
+while IFS="$S" read -r full name sha upstream track date subject; do
+    # refs/remotes/<r>/HEAD shortens to "<r>" — filter on the full refname, or it
+    # arrives as a phantom branch line named after the remote.
+    case "$full" in */HEAD) continue ;; esac
+    [ -n "$name" ] || continue
+    N=$((N + 1))
+    [ "$TOTAL" -gt 60 ] && [ $((N % 25)) = 0 ] && warn "scanned $N/$TOTAL refs…"
+
+    kind=L
+    for r in $REMOTES; do case "$name" in "$r"/*) kind=R ;; esac; done
+    key=$(line_key "$name")
+    ncommits=$(git rev-list --count --no-merges "$BASE..$name" 2>/dev/null || echo 0)
+
+    flags=""
+    in_set "$name" "$MERGED_BASE" && flags="$flags,mergedbase"
+    in_set "$name" "$MERGED_HEAD" && flags="$flags,mergedhead"
+    [ "$name" = "$CURRENT" ] && flags="$flags,current"
+    [ "$kind" = L ] && [ "$name" != "$CURRENT" ] && in_set "$name" "$WORKTREES" && flags="$flags,worktree"
+    case "$track" in *gone*) flags="$flags,gone" ;; esac
+    [ "$kind" = L ] && [ -z "$upstream" ] && flags="$flags,noupstream"
+    if [ -n "$upstream" ] && git rev-parse --verify --quiet "$upstream^{commit}" >/dev/null; then
+        git merge-base --is-ancestor "$name" "$upstream" && flags="$flags,mergedup"
+        set -- $(counts "$name" "$upstream")
+        printf 'U%s%s%s%s%s%s%s%s\n' "$S" "$name" "$S" "$upstream" "$S" "${1:-?}" "$S" "${2:-?}" >>"$DATA"
+    fi
+
+    toodiv=0; [ "$ncommits" -gt "$LIMIT" ] && toodiv=1
+    printf 'R%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n' \
+        "$S" "$name" "$S" "$kind" "$S" "$key" "$S" "$sha" "$S" "$upstream" \
+        "$S" "$date" "$S" "$ncommits" "$S" "$toodiv" "$S" "${flags#,}" >>"$DATA"
+    printf 'S%s%s%s%s\n' "$S" "$name" "$S" "$subject" >>"$DATA"
+
+    # This ref's own patch-ids: one pipeline per ref, skipped when hopeless.
+    if [ "$toodiv" = 0 ] && [ "$ncommits" -gt 0 ]; then
+        git -c diff.noprefix=false --no-pager \
+            log --no-ext-diff --no-textconv --no-merges --format='commit %H' --patch "$BASE..$name" 2>/dev/null \
+          | git patch-id --stable \
+          | awk -v n="$name" -v s="$S" '{print "P" s n s $1}' >>"$DATA"
+    fi
+
+    # Squash-merge leaves no commit in common — only the branch's *cumulative*
+    # diff survives, as one commit in the base. Match on that diff's patch-id.
+    if [ "$toodiv" = 0 ] && [ "$ncommits" -gt 0 ]; then
+        if mb=$(git merge-base "$BASE" "$name" 2>/dev/null); then
+            cum=$(git -c diff.noprefix=false --no-pager \
+                      diff --no-ext-diff --no-textconv "$mb" "$name" 2>/dev/null \
+                    | git patch-id --stable | cut -d' ' -f1)
+            # A plain `x && y` tail here would end the enclosing `if`s with a
+            # nonzero status, and `set -e` kills the script on that.
+            if [ -n "$cum" ]; then
+                printf 'Q%s%s%s%s\n' "$S" "$name" "$S" "$cum" >>"$DATA"
+            fi
+        fi
+    fi
+
+    # A local branch with no upstream: is there an obvious remote branch for it?
+    if [ "$kind" = L ] && [ -z "$upstream" ]; then
+        for r in $REMOTES; do
+            git rev-parse --verify --quiet "refs/remotes/$r/$name" >/dev/null || continue
+            set -- $(counts "$name" "$r/$name")
+            printf 'C%s%s%s%s%s%s%s%s\n' "$S" "$name" "$S" "$r/$name" "$S" "${1:-?}" "$S" "${2:-?}" >>"$DATA"
+        done
+    fi
+done < <(git for-each-ref --format="$FMT" "${SCOPE[@]}")
+
+[ "$N" -gt 0 ] || die "no branches found"
+
+# ------------------------------------------------------------------ report
+awk -F"$S" -v base="$BASE" -v basekey="$BASE_KEY" -v basesha="$(printf '%.9s' "$BASE_SHA")" \
+    -v root="$ROOT" -v color="$COLOR" -v limit="$LIMIT" '
+function has(f, v)  { return index("," f ",", "," v ",") > 0 }
+function c(code, s) { return color == "always" ? "\033[" code "m" s "\033[0m" : s }
+function hdr(s)     { return c("1;4", s) }
+function dim(s)     { return c("2", s) }
+function cmd(s)     { return c("36", s) }
+
+$1 == "R" {
+    n = $2
+    kind[n] = $3; key[n] = $4; sha[n] = $5; up[n] = $6; date[n] = $7
+    nc[n] = $8 + 0; toodiv[n] = $9 + 0; fl[n] = $10
+    refs[$4] = refs[$4] (refs[$4] ? " " : "") n
+    if (!($4 in lines)) { lines[$4] = 1; order[++nlines] = $4 }
+    nrefs++
+    next
+}
+$1 == "S" { subj[$2] = $3; next }
+$1 == "P" { seen[$2, $3] = 1; next }
+$1 == "B" { inbase[$2] = 1; next }
+$1 == "Q" { cum[$2] = $3; next }
+$1 == "C" { cand[$2] = cand[$2] (cand[$2] ? "\n" : "") $3 "|" $4 "|" $5; next }
+$1 == "U" { updelta[$2] = $4 "|" $5; next }
+
+END {
+    # One representative ref per line: the fullest tip, local winning ties. A
+    # local branch sitting behind its remote must not be mistaken for the line.
+    for (i = 1; i <= nlines; i++) {
+        k = order[i]; n = split(refs[k], rs, " "); best = ""
+        for (j = 1; j <= n; j++) {
+            r = rs[j]
+            if (best == "" || nc[r] > nc[best] || (nc[r] == nc[best] && kind[r] == "L" && kind[best] == "R"))
+                best = r
+            if (kind[r] == "L") loc[k] = r; else rem[k] = rem[k] (rem[k] ? " " : "") r
+        }
+        rep[k] = best; lnc[k] = nc[best]; ltd[k] = toodiv[best]
+    }
+
+    # Patch ownership, counted once per line via its representative ref only —
+    # a line holding both foo and origin/foo would otherwise contain itself.
+    for (kk in seen) {
+        split(kk, a, SUBSEP); r = a[1]; p = a[2]
+        if (rep[key[r]] != r) continue
+        lpid[key[r]]++
+        if (p in inbase) already[key[r]]++
+        owners[p] = owners[p] (owners[p] ? " " : "") key[r]
+    }
+    for (p in owners) {
+        m = split(owners[p], hold, " ")
+        for (a1 = 1; a1 <= m; a1++) for (b1 = 1; b1 <= m; b1++)
+            if (a1 != b1) shared[hold[a1], hold[b1]]++
+    }
+
+    # --- pass 1: what is out of the running, and what is already dead
+    for (i = 1; i <= nlines; i++) {
+        k = order[i]; r = rep[k]
+        if (k == basekey) { put("skip", k, "is the base"); continue }
+        if (ltd[k])       { put("skip", k, lnc[k] " commits ahead of the base — past --limit " limit ", not compared"); continue }
+        if (lnc[k] == 0 || has(fl[r], "mergedbase")) { put("dead", k, "merged into " base); continue }
+        if (lpid[k] == 0) { put("skip", k, lnc[k] " commit(s) carrying no comparable content (empty or merge-only)"); continue }
+        if (already[k] == lpid[k]) { put("dead", k, "all " lpid[k] " commit(s) are already in " base " under other shas — rebase-merged"); continue }
+        if ((rep[k] in cum) && (cum[rep[k]] in inbase)) { put("dead", k, "squash-merged into " base " — its whole diff is one commit there"); continue }
+    }
+
+    # --- pass 2: containment, among the lines still standing
+    for (i = 1; i <= nlines; i++) {
+        k = order[i]; if (bkt[k]) continue
+        big = ""; dup = ""; ndup = 0
+        for (j = 1; j <= nlines; j++) {
+            o = order[j]
+            if (o == k || bkt[o] == "skip" || shared[k, o] != lpid[k]) continue
+            if (lpid[o] > lpid[k]) { if (big == "" || lpid[o] > lpid[big]) big = o }
+            else { ndup++; if (dup == "") dup = o }   # identical patch set
+        }
+        if (big != "") { put("dead", k, lpid[k] " commit(s), every one also on " c("1", big)); contained[k] = 1; continue }
+        if (dup != "") { cluster[k] = dup; nclust[k] = ndup }
+    }
+
+    # --- pass 3: identical twins. Exactly one of each cluster survives, or the
+    #     work is deleted twice over; the published line is the one to keep.
+    for (i = 1; i <= nlines; i++) {
+        k = order[i]; if (bkt[k] || !(k in cluster)) continue
+        if (anchored[k]) continue
+        n = 0; delete grp
+        grp[++n] = k
+        for (j = 1; j <= nlines; j++) {
+            o = order[j]
+            if (o != k && !bkt[o] && shared[k, o] == lpid[k] && lpid[o] == lpid[k]) grp[++n] = o
+        }
+        keep = grp[1]
+        for (j = 2; j <= n; j++) if (score(grp[j]) > score(keep)) keep = grp[j]
+        for (j = 1; j <= n; j++) {
+            anchored[grp[j]] = 1
+            if (grp[j] != keep) put("dead", grp[j], "identical work to " c("1", keep) " — same " lpid[keep] " commit(s), different shas")
+        }
+        twin[keep] = 1
+    }
+
+    # --- pass 4: uniqueness measured against the survivors only, so what is
+    #     left reads as it will read once the redundant lines are gone.
+    for (p in owners) {
+        m = split(owners[p], hold, " "); alive = 0; who = ""
+        for (a1 = 1; a1 <= m; a1++) if (bkt[hold[a1]] != "dead" && bkt[hold[a1]] != "skip") { alive++; who = hold[a1] }
+        if (alive == 1) uniq[who]++
+    }
+    for (i = 1; i <= nlines; i++) {
+        k = order[i]; if (bkt[k]) continue
+        extra = (already[k] > 0) ? ", " already[k] " already in " base : ""
+        if (uniq[k] + 0 >= lpid[k]) put("live", k, lpid[k] " commit(s), all unique" extra)
+        else put("mixed", k, lpid[k] " commit(s), " uniq[k] + 0 " unique, " lpid[k] - uniq[k] " shared with " sharers(k) extra)
+    }
+
+    printf "%s  %s\n", c("1", root), dim("base: " base " (" basesha ")")
+    printf "%s\n\n", dim(nlines " branch line(s) over " nrefs " ref(s)")
+    section("REDUNDANT — carries nothing that is not already somewhere else", "dead")
+    section("OVERLAPPING — part of it lives on another surviving line too", "mixed")
+    section("UNIQUE — no other line has these commits", "live")
+    tracking()
+    section("SKIPPED", "skip")
+}
+
+function put(bucket, k, why) { bkt[k] = bucket; note[k] = why; cnt[bucket]++ }
+
+# Which twin to keep: the published one, then the one with more refs.
+function score(k) { return (rem[k] ? 10 : 0) + (loc[k] ? 1 : 0) }
+
+function sharers(k,   j, o, out, n) {
+    for (j = 1; j <= nlines; j++) {
+        o = order[j]
+        if (o != k && bkt[o] != "dead" && bkt[o] != "skip" && shared[k, o] > 0) {
+            out = out (out ? ", " : "") o "(" shared[k, o] ")"
+            if (++n >= 3) break
+        }
+    }
+    return out
+}
+
+function where(k,   out) {
+    out = loc[k] ? "local" : ""
+    return out (rem[k] ? (out ? "+" : "") rem[k] : "")
+}
+
+function unpushed(k,   f) {
+    if (!loc[k] || !(loc[k] in updelta)) return 0
+    split(updelta[loc[k]], f, "|")
+    return f[1] + 0
+}
+
+function delcmd(k,   r, d, out) {
+    if (!loc[k]) return ""
+    r = loc[k]
+    if (has(fl[r], "current"))  return dim("      current branch — switch away before deleting")
+    if (has(fl[r], "worktree")) return dim("      checked out in a worktree — remove that worktree first")
+    d = (has(fl[r], "mergedhead") || has(fl[r], "mergedup")) ? "-d" : "-D"
+    out = "      " cmd("git branch " d " " r)
+    if (d == "-D") out = out dim("   (-d refuses it: the copy is patch-equal, not an ancestor)")
+    if (unpushed(k) > 0)
+        out = out "\n" dim("      " unpushed(k) " commit(s) here are on no remote — the content is elsewhere, this ref is not")
+    return out
+}
+
+function section(title, bucket,   i, k, r, extra, rr) {
+    if (!cnt[bucket]) return
+    print hdr(title)
+    for (i = 1; i <= nlines; i++) {
+        k = order[i]; if (bkt[k] != bucket) continue
+        r = rep[k]
+        printf "  %-26s %s\n", c("1", k), note[k]
+        printf "  %-26s %s\n", "", dim(where(k) " · " substr(sha[r], 1, 9) " · " date[r] " · " substr(subj[r], 1, 40))
+        if (bucket == "dead") {
+            extra = delcmd(k); if (extra) print extra
+            if (rem[k]) {
+                split(rem[k], rr, " ")
+                printf "      %s%s\n", cmd("git push " remote_of(rr[1]) " --delete " k), dim("   (publishing — confirm first)")
+            }
+        }
+        if (twin[k]) printf "      %s\n", dim("keep this one: a twin of it is listed as redundant above")
+    }
+    print ""
+}
+
+function remote_of(r) { sub("/.*", "", r); return r }
+
+function tracking(   i, k, r, n, j, parts, f, any, out) {
+    for (i = 1; i <= nlines; i++) {
+        k = order[i]; if (!loc[k]) continue
+        r = loc[k]; out = ""
+        if (has(fl[r], "gone"))
+            out = "upstream " c("1", up[r]) " is gone — deleted on the remote"
+        else if (has(fl[r], "noupstream") && (r in cand)) {
+            n = split(cand[r], parts, "\n")
+            for (j = 1; j <= n; j++) {
+                split(parts[j], f, "|")
+                out = out (out ? "; " : "") "no upstream, but " c("1", f[1]) " exists " \
+                      (f[2] + 0 == 0 && f[3] + 0 == 0 ? "at the same commit" : "(" f[2] " ahead, " f[3] " behind)")
+                out = out "\n      " cmd("git branch --set-upstream-to=" f[1] " " r)
+            }
+        }
+        else if (r in updelta) {
+            split(updelta[r], f, "|")
+            if (f[1] + 0 > 0 && f[2] + 0 > 0) out = "diverged from " up[r] " — " f[1] " ahead, " f[2] " behind"
+            else if (f[1] + 0 > 0)            out = f[1] " commit(s) never pushed to " up[r]
+            else if (f[2] + 0 > 0)            out = f[2] " commit(s) behind " up[r]
+        }
+        if (out) { if (!any++) print hdr("TRACKING"); printf "  %-26s %s\n", c("1", k), out }
+    }
+    if (any) print ""
+}
+' "$DATA"
