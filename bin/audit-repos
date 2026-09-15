@@ -1,0 +1,635 @@
+#!/usr/bin/env bash
+# audit-repos — audit every git clone gitpane tracks and report, for each one:
+# whether the self-hosted forgejo remote is on it, whether a deprecated
+# bitbucket remote survives anywhere, whether a github remote is present, and
+# whether the clone is clean.
+#
+# Usage:
+#   audit-repos [options] [<root>...]
+#
+# Options:
+#   --fetch          refresh remote-tracking refs first, in parallel, before
+#                    reading ahead/behind. Off by default: it is a network
+#                    round-trip per repo, and the roster is worth having offline
+#   --config <path>  gitpane config.toml to take roots from (default: the same
+#                    resolution order gitpane itself uses)
+#   --tsv            one tab-separated row per repo, for scripts and agents
+#   --md             a GitHub-flavoured markdown table, for pasting somewhere
+#                    that renders it — a chat client on a phone, an issue, a
+#                    wiki. Zero prints as an empty cell rather than the dot the
+#                    terminal needs, because markdown does its own alignment
+#   --all            list the clean repos too. By default only repos with
+#                    something to report are printed: a roster where 54 of 61
+#                    rows say `ok` buries the seven that do not
+#   --jobs <n>       parallel fetches (default: cores, capped at 8)
+#   --no-color       plain output
+#   -h, --help       this text
+#
+# ROOTS
+#
+# With no <root> argument the roots, scan depth and exclusions all come from
+# gitpane's config.toml, so the audit covers exactly the repos gitpane shows and
+# no others — which is the whole point of it. An explicit <root> overrides
+# root_dirs only; scan_depth and excluded_repos still come from the config.
+#
+# WHAT IT MATCHES ON
+#
+# A remote is classified by the *host* in its URL, and by nothing else — not the
+# remote's name, not the repo's directory name, not the rest of the URL. All
+# three mislead in practice:
+#
+#   ~/code/forgejo/bitbucket-msp-cmake   origin = forgejo:alexander/bitbucket-msp-cmake.git
+#
+# is a forgejo repo that reads as a bitbucket one to anything matching the whole
+# URL, because the word survives in the repo's own name. A remote *named*
+# `forgejo` pointing at github is a github remote for the same reason.
+#
+# Fetch URL, push URL and the URL after `url.<base>.insteadOf` rewriting are all
+# classified, so a surviving bitbucket host cannot hide behind an alias in
+# ~/.gitconfig or behind a pushurl that differs from the fetch URL.
+#
+# The three patterns are matched case-insensitively as extended regexes against
+# the host, and each is overridable for a machine whose forge does not spell its
+# own name in its hostname:
+#
+#   AUDIT_REPOS_FORGEJO=forgejo
+#   AUDIT_REPOS_BITBUCKET=bitbucket
+#   AUDIT_REPOS_GITHUB=github
+#
+# Set those in ~/.bashrc.local rather than here — this repo is public and a
+# self-hosted forge's hostname is machine-specific.
+#
+# COLUMNS
+#
+#   FORGE / GH    is a remote pointing at the self-hosted forge / at github
+#   MOD DEL ADD   changed paths by kind, one bucket each, so they sum to the
+#                 number of changed files. A path staged one way and edited
+#                 another counts once, under the more destructive of the two.
+#                 Renames and copies land in MOD
+#   UNT           untracked paths (a whole untracked directory counts as one)
+#   CNF           unmerged paths — a merge or rebase stopped here
+#   AHEAD BEHIND  current branch against its upstream
+#   L-BR L-CMT    local branches, and commits on them, reachable from no remote
+#                 ref at all. This is the real "exists nowhere else" measure:
+#                 a branch with no upstream whose commits already sit on
+#                 origin/master scores zero, and a repo with no remotes counts
+#                 its whole history
+#   NOTES         the conditions a number cannot carry:
+#                   no-remotes   no remote configured at all
+#                   bitbucket    a deprecated bitbucket host survives somewhere
+#                   dup:a,b      two remote names resolving to one URL
+#                   multi-url:r  one remote carrying several URLs — a push goes
+#                                to every one of them
+#                   push→X       that remote's pushurl leaves for a different
+#                                host than it fetches from
+#                   detached     HEAD is not on a branch
+#                   mid-rebase   a rebase, merge, cherry-pick, revert or bisect
+#                   mid-merge …  was started and never finished. CNF sees these
+#                                only while conflicts are still marked; resolve
+#                                them, walk away, and the repo looks ordinary
+#                   gone:b       upstream branch deleted from under a local one
+#                   stash:N      N stash entries
+#                   fetch-failed --fetch could not reach this repo's remote, so
+#                                its AHEAD/BEHIND are stale under a header that
+#                                otherwise claims to be current
+#                   error        git could not read the repo
+#
+# A repo is printed when FORGE is NO, GH is yes, any count is non-zero, or NOTES
+# is non-empty. BEHIND alone is deliberately not enough: being behind costs
+# nothing and loses nothing, so it is a pull waiting to happen, not a finding.
+#
+# Read-only: it never writes to a repo, and without --fetch it never touches the
+# network.
+set -euo pipefail
+
+die()   { echo "audit-repos: $*" >&2; exit 1; }
+warn()  { echo "audit-repos: $*" >&2; }
+usage() { sed -n '2,${/^#/!q; s/^# \{0,1\}//; p;}' "$0"; }
+
+FETCH=0; CONFIG=""; TSV=0; MD=0; ALL=0; COLOR=auto; JOBS=""
+declare -a CLI_ROOTS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --fetch)     FETCH=1; shift ;;
+        --config)    [ $# -ge 2 ] || die "--config needs a path"; CONFIG=$2; shift 2 ;;
+        --config=*)  CONFIG=${1#--config=}; shift ;;
+        --tsv)       TSV=1; shift ;;
+        --md|--markdown) MD=1; COLOR=never; shift ;;
+        --all)       ALL=1; shift ;;
+        --jobs)      [ $# -ge 2 ] || die "--jobs needs a number"; JOBS=$2; shift 2 ;;
+        --jobs=*)    JOBS=${1#--jobs=}; shift ;;
+        --no-color)  COLOR=never; shift ;;
+        -h|--help)   usage; exit 0 ;;
+        -*)          die "unknown option: $1 (--help for the list)" ;;
+        *)           CLI_ROOTS+=("$1"); shift ;;
+    esac
+done
+[ -n "$JOBS" ] || JOBS=$( { command -v nproc >/dev/null && nproc; } 2>/dev/null || echo 4 )
+[ "$JOBS" -gt 8 ] 2>/dev/null && JOBS=8
+case "$JOBS" in ''|*[!0-9]*) die "--jobs wants a number, got: $JOBS" ;; esac
+[ "$COLOR" = auto ] && { [ -t 1 ] && COLOR=always || COLOR=never; }
+if [ "$COLOR" = always ]; then
+    C_RED=$'\033[31m'; C_YEL=$'\033[33m'; C_GRN=$'\033[32m'
+    C_DIM=$'\033[2m';  C_BLD=$'\033[1m';  C_OFF=$'\033[0m'
+else
+    C_RED=""; C_YEL=""; C_GRN=""; C_DIM=""; C_BLD=""; C_OFF=""
+fi
+
+RE_FORGEJO=${AUDIT_REPOS_FORGEJO:-forgejo}
+RE_BITBUCKET=${AUDIT_REPOS_BITBUCKET:-bitbucket}
+RE_GITHUB=${AUDIT_REPOS_GITHUB:-github}
+
+# ------------------------------------------------------------------ config
+# gitpane's own resolution order, first hit wins. It logs the path it resolved
+# at startup; this has to agree with that or the audit covers the wrong set.
+find_config() {
+    local c
+    for c in ${GITPANE_CONFIG:+"$GITPANE_CONFIG"} \
+             ${XDG_CONFIG_HOME:+"$XDG_CONFIG_HOME/gitpane/config.toml"} \
+             "$HOME/.config/gitpane/config.toml" \
+             "$HOME/Library/Application Support/gitpane/config.toml"; do
+        [ -f "$c" ] && { printf '%s' "$c"; return 0; }
+    done
+    return 1
+}
+
+# Enough TOML to read three keys. gitpane writes its arrays on one line, but a
+# hand-edited config may wrap them, so accumulate until the closing bracket.
+toml_array() {  # <file> <key>  ->  one value per line
+    awk -v key="$2" '
+        !started {
+            if ($0 !~ "^[[:space:]]*" key "[[:space:]]*=") next
+            sub("^[^=]*=", ""); started = 1
+        }
+        started { buf = buf $0; if (index($0, "]")) exit }
+        END {
+            n = split(buf, part, /"/)
+            for (i = 2; i <= n; i += 2) print part[i]
+        }
+    ' "$1"
+}
+toml_int() {  # <file> <key>  ->  the integer, or nothing
+    awk -v key="$2" '
+        $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            sub("^[^=]*=", ""); gsub(/[^0-9]/, ""); if ($0 != "") print; exit
+        }
+    ' "$1"
+}
+# A literal ~ is the point in both directions here: the config stores paths with
+# one and the report prints them back with one, so SC2088 is expected.
+# shellcheck disable=SC2088
+untilde() { case $1 in "~/"*) printf '%s' "$HOME/${1#\~/}" ;; *) printf '%s' "$1" ;; esac; }
+# shellcheck disable=SC2088
+tilde()   { case $1 in "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;; *) printf '%s' "$1" ;; esac; }
+
+[ -n "$CONFIG" ] || CONFIG=$(find_config || true)
+declare -a ROOTS=() EXCLUDE=()
+DEPTH=""
+if [ -n "$CONFIG" ]; then
+    [ -f "$CONFIG" ] || die "no such config: $CONFIG"
+    while IFS= read -r line; do [ -n "$line" ] && ROOTS+=("$(untilde "$line")"); done < <(toml_array "$CONFIG" root_dirs)
+    while IFS= read -r line; do [ -n "$line" ] && EXCLUDE+=("$line"); done < <(toml_array "$CONFIG" excluded_repos)
+    DEPTH=$(toml_int "$CONFIG" scan_depth)
+elif [ ${#CLI_ROOTS[@]} -eq 0 ]; then
+    die "no gitpane config found and no <root> given — pass a root, or --config"
+fi
+[ ${#CLI_ROOTS[@]} -gt 0 ] && { ROOTS=(); for r in "${CLI_ROOTS[@]}"; do ROOTS+=("$(untilde "$r")"); done; }
+[ -n "$DEPTH" ] || DEPTH=3          # gitpane's own default is 2; this repo ships 3
+[ ${#ROOTS[@]} -gt 0 ] || die "config has no root_dirs: $CONFIG"
+
+# ---------------------------------------------------------------- discover
+# Mirrors gitpane's walk: a `.git` at or under scan_depth, counted from the
+# root, with excluded names pruned. `.git` is matched as a name rather than a
+# directory so linked worktrees and submodules (where it is a file) still count.
+discover() {
+    local root=$1
+    [ -d "$root" ] || { warn "missing root: $(tilde "$root")"; return 0; }
+    local -a prune=()
+    local x
+    for x in ${EXCLUDE[@]+"${EXCLUDE[@]}"}; do prune+=(-name "$x" -o); done
+    if [ ${#prune[@]} -gt 0 ]; then
+        unset "prune[$((${#prune[@]} - 1))]"
+        find "$root" -maxdepth "$DEPTH" \( "${prune[@]}" \) -prune -o -name .git -print 2>/dev/null || true
+    else
+        find "$root" -maxdepth "$DEPTH" -name .git -print 2>/dev/null || true
+    fi
+    return 0
+}
+
+declare -a REPOS=()
+while IFS= read -r g; do REPOS+=("${g%/.git}"); done < <(
+    for r in "${ROOTS[@]}"; do discover "$r"; done | sort -u
+)
+[ ${#REPOS[@]} -gt 0 ] || die "no repositories found under: $(for r in "${ROOTS[@]}"; do tilde "$r"; printf ' '; done)"
+
+# ------------------------------------------------------------------- fetch
+FETCH_NOTE="remote state from local refs, not refreshed — pass --fetch to update"
+FETCH_FAILED=""
+if [ "$FETCH" = 1 ]; then
+    warn "fetching ${#REPOS[@]} repos, $JOBS at a time…"
+    TIMEOUT=""
+    command -v timeout >/dev/null 2>&1 && TIMEOUT="timeout 30"
+    command -v gtimeout >/dev/null 2>&1 && [ -z "$TIMEOUT" ] && TIMEOUT="gtimeout 30"
+    # Batch-mode ssh and no terminal prompt: an unreachable host or a passphrase
+    # must fail this repo, not hang the whole audit waiting on a tty.
+    FAILFILE=$(mktemp "${TMPDIR:-/tmp}/audit-repos.XXXXXX")
+    printf '%s\0' "${REPOS[@]}" | FAILFILE="$FAILFILE" GIT_TERMINAL_PROMPT=0 \
+        GIT_SSH_COMMAND="ssh -oBatchMode=yes -oConnectTimeout=10" \
+        xargs -0 -P "$JOBS" -I{} sh -c "$TIMEOUT git -C \"\$1\" fetch --all --prune --quiet >/dev/null 2>&1 || printf '%s\\n' \"\$1\" >> \"\$FAILFILE\"" _ {}
+    FETCH_FAILED=$(cat "$FAILFILE"); rm -f "$FAILFILE"
+    NFAILED=$(printf '%s' "$FETCH_FAILED" | grep -c . || true)
+    FETCH_NOTE="fetched $(date '+%Y-%m-%d %H:%M')"
+    [ "${NFAILED:-0}" -gt 0 ] && FETCH_NOTE="$FETCH_NOTE — $NFAILED repo(s) FAILED to fetch and are showing stale refs"
+fi
+FETCH_STALE=""   # filled in once the ages are known, below
+
+# ------------------------------------------------------------------- audit
+url_host() {
+    local u=$1
+    case $u in
+        *://*)  u=${u#*://}; u=${u#*@}; printf '%s' "${u%%[/:]*}" ;;
+        *@*:*)  u=${u#*@};              printf '%s' "${u%%:*}" ;;
+        *:*)    printf '%s' "${u%%:*}" ;;      # bare ssh alias: forgejo:path.git
+        *)      printf '%s' "local" ;;
+    esac
+}
+classify() {  # <url> -> forgejo | bitbucket | github | <host>
+    local h; h=$(url_host "$1")
+    if   printf '%s' "$h" | grep -qiE "$RE_FORGEJO";   then printf 'forgejo'
+    elif printf '%s' "$h" | grep -qiE "$RE_BITBUCKET"; then printf 'bitbucket'
+    elif printf '%s' "$h" | grep -qiE "$RE_GITHUB";    then printf 'github'
+    else printf '%s' "$h"
+    fi
+}
+# printf pads by bytes, ${#s} counts characters, and the roster prints both an
+# arrow and em dashes — so pad by hand or every non-ASCII cell shifts its column.
+pad() {  # <string> <width>
+    local n=$(( $2 - ${#1} ))
+    printf '%s' "$1"
+    [ "$n" -gt 0 ] && printf '%*s' "$n" ''
+    return 0
+}
+join_by() { local sep=$1; shift; [ $# -eq 0 ] && return 0; printf '%s' "$1"; shift; printf "%s%s" "${@/#/$sep}"; }
+cap_list() {  # <n> <sep> <item>...   ->  a<sep>b<sep>c +N more
+    local n=$1 sep=$2; shift 2
+    local -a head=("${@:1:$n}")
+    local rest=$(( $# - n ))
+    local out; out=$(join_by "$sep" "${head[@]}")
+    [ "$rest" -gt 0 ] && out="$out +$rest more"
+    printf '%s' "$out"
+}
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+
+# Fills the R_* globals for one repo. Globals rather than a return value because
+# there are a dozen fields and this runs once per repo, not in a pipeline.
+audit_repo() {
+    local d=$1
+    R_FLAGS=(); R_REMOTES=""; R_URLS=""; R_STATUS=ok; R_ISSUE=0
+    R_MOD=0; R_DEL=0; R_ADD=0; R_UNT=0; R_CNF=0; R_STASH=0
+    R_AHEAD=0; R_BEHIND=0; R_HEAD="?"; R_FETCH_AGE=-1
+    R_LBR=0; R_LCMT=0; R_FORGE=no; R_GH=no
+
+    if ! git -C "$d" rev-parse --git-dir >/dev/null 2>&1; then
+        R_FLAGS=(error); R_STATUS='!!'; R_ISSUE=1; return 0
+    fi
+
+    # Every URL git knows for this remote: configured fetch, configured push,
+    # and the insteadOf-expanded form. --get-url expands without a round-trip.
+    local name fu pu ru nurls blob="" descs=() pairs=()
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        fu=$(git -C "$d" remote get-url "$name" 2>/dev/null || true)
+        pu=$(git -C "$d" remote get-url --push "$name" 2>/dev/null || true)
+        ru=$(git -C "$d" ls-remote --get-url "$name" 2>/dev/null || true)
+        # Hosts, not URLs: the repo's own name lives in the path, and names like
+        # bitbucket-msp-cmake would otherwise convict a forgejo remote. Every
+        # URL, not just the first — `get-url` without --all hides the extras a
+        # `set-url --add` remote pushes to.
+        local one
+        while IFS= read -r one; do
+            [ -n "$one" ] || continue
+            blob+="$(url_host "$one")"$'\n'
+        done < <({ git -C "$d" remote get-url --all "$name"
+                   git -C "$d" remote get-url --push --all "$name"; } 2>/dev/null)
+        blob+="$(url_host "$ru")"$'\n'
+        descs+=("$name→$(classify "${fu:-$ru}")")
+        pairs+=("$name=${fu:-$ru}")
+        # `set-url --add` gives one remote several URLs and pushes to all of
+        # them. Nothing in `git remote -v` reads as unusual, so it is invisible
+        # until a push lands somewhere nobody meant it to.
+        nurls=$(git -C "$d" remote get-url --all "$name" 2>/dev/null | grep -c . || true)
+        if [ "${nurls:-1}" -gt 1 ]; then R_FLAGS+=("multi-url:$name"); fi
+        # A pushurl on a different host than the fetch URL is legitimate for a
+        # fork, and a quiet disaster otherwise — either way it is worth seeing.
+        if [ -n "$pu" ] && [ "$(url_host "$pu")" != "$(url_host "$fu")" ]; then
+            R_FLAGS+=("push→$(classify "$pu")")
+        fi
+    done < <(git -C "$d" remote 2>/dev/null)
+
+    # Two names for one URL: a rename that left the old name behind, or a second
+    # remote added because the first was forgotten. Harmless until a push or a
+    # prune picks the wrong one, and it makes every other remote listing lie
+    # about how many places this repo actually goes.
+    if [ ${#pairs[@]} -gt 1 ]; then
+        local dup
+        while IFS= read -r dup; do
+            [ -n "$dup" ] && R_FLAGS+=("dup:$dup")
+        done < <(printf '%s\n' "${pairs[@]}" | awk -F'=' '
+            # Membership is tested against cnt, not names: assigning to
+            # names[u] materialises the element first, so `u in names` is
+            # already true on the very first hit and splices in an empty name.
+            { n = $1; u = substr($0, index($0, "=") + 1)
+              if (u in cnt) names[u] = names[u] "," n; else names[u] = n
+              cnt[u]++ }
+            END { for (u in cnt) if (cnt[u] > 1) print names[u] }')
+    fi
+
+    R_REMOTES=$(join_by ' ' ${descs[@]+"${descs[@]}"})
+    R_URLS=$(join_by ';' ${pairs[@]+"${pairs[@]}"})
+
+    # FORGE and GH become columns, so they leave NOTES for the rare conditions
+    # a number cannot express.
+    if [ ${#descs[@]} -eq 0 ]; then
+        R_FLAGS+=(no-remotes)                       # implies no forge; saying both is noise
+    else
+        if grep -qiE "$RE_FORGEJO"   <<<"$blob"; then R_FORGE=yes; fi
+        if grep -qiE "$RE_BITBUCKET" <<<"$blob"; then R_FLAGS+=(bitbucket); fi
+        if grep -qiE "$RE_GITHUB"    <<<"$blob"; then R_GH=yes; fi
+        # With the forge missing, where the remotes DO point is the whole
+        # diagnosis: `origin→github` is a real gap, while a bare hostname means
+        # the forge pattern missed and the remote was there all along.
+        if [ "$R_FORGE" = no ]; then R_FLAGS+=("$R_REMOTES"); fi
+    fi
+
+    # One bucket per changed path, so MOD+DEL+ADD is the number of changed
+    # files. $2 is porcelain-v2's XY pair (X staged, Y unstaged); a path can be
+    # both, and the more destructive of the two wins. Renames land in MOD.
+    read -r R_HEAD R_AHEAD R_BEHIND R_MOD R_DEL R_ADD R_UNT R_CNF < <(
+        git -C "$d" status --porcelain=v2 --branch --untracked-files=normal 2>/dev/null | awk '
+            /^# branch\.head /  { head = $3 }
+            /^# branch\.ab /    { ahead = substr($3, 2) + 0; behind = substr($4, 2) + 0 }
+            /^[12] / {
+                x = substr($2, 1, 1); y = substr($2, 2, 1)
+                if      (x == "D" || y == "D") del++
+                else if (x == "A" || y == "A") add++
+                else                           mod++
+            }
+            /^u /               { cnf++ }
+            /^\? /              { unt++ }
+            END {
+                print (head == "" ? "?" : head), ahead + 0, behind + 0,
+                      mod + 0, del + 0, add + 0, unt + 0, cnf + 0
+            }'
+    )
+    if [ "$R_HEAD" = "(detached)" ]; then R_FLAGS+=(detached); fi
+
+    # Commits that exist on no remote — the measure an audit is actually for.
+    # `--not --remotes` is what makes it true rather than approximate: a branch
+    # with no upstream whose commits already sit on origin/master is not at
+    # risk, and a repo with no remotes at all correctly counts its whole history.
+    local b n
+    while IFS= read -r b; do
+        [ -n "$b" ] || continue
+        n=$(git -C "$d" rev-list --count "$b" --not --remotes 2>/dev/null || echo 0)
+        if [ "${n:-0}" -gt 0 ]; then R_LBR=$(( R_LBR + 1 )); fi
+    done < <(git -C "$d" for-each-ref --format='%(refname)' refs/heads 2>/dev/null)
+    R_LCMT=$(git -C "$d" rev-list --count --branches --not --remotes 2>/dev/null || echo 0)
+
+    # An upstream deleted underneath a local branch: not a push, a recovery.
+    local track
+    local -a gone=()
+    # The upstream name itself is not needed — only whether git still sees one.
+    while IFS=$'\x1f' read -r b _ track; do
+        [ -n "$b" ] || continue
+        if [ "$track" = "[gone]" ]; then gone+=("$b"); fi
+    done < <(git -C "$d" for-each-ref --format='%(refname:short)'$'\x1f''%(upstream:short)'$'\x1f''%(upstream:track)' refs/heads 2>/dev/null)
+    if [ ${#gone[@]} -gt 0 ]; then R_FLAGS+=("gone:$(cap_list 2 , "${gone[@]}" | tr -d ' ')"); fi
+
+    R_STASH=$(git -C "$d" stash list --format=%H 2>/dev/null | grep -c . || true)
+    if [ "$R_STASH" -gt 0 ]; then R_FLAGS+=("stash:$R_STASH"); fi
+
+    # What makes a repo worth printing. `behind` is deliberately absent: it
+    # costs nothing and loses nothing, so a repo that is merely behind is not a
+    # finding, it is a pull waiting to happen.
+    if [ "$R_FORGE" = no ] || [ "$R_GH" = yes ] || [ ${#R_FLAGS[@]} -gt 0 ] \
+       || [ $(( R_MOD + R_DEL + R_ADD + R_UNT + R_CNF )) -gt 0 ] || [ "$R_LBR" -gt 0 ]; then
+        R_ISSUE=1
+    fi
+
+    # --absolute-git-dir, not --git-path: under `-C` the latter answers
+    # `.git/FETCH_HEAD` relative to the *caller's* cwd, so every repo silently
+    # reports the age of whatever repo the audit was launched from.
+    local gd; gd=$(git -C "$d" rev-parse --absolute-git-dir 2>/dev/null || true)
+
+    # A merge or rebase abandoned half-way. CNF catches it only while there are
+    # conflicts still marked; stop in a clean spot, walk away, and the repo
+    # looks ordinary while HEAD is parked mid-operation.
+    if [ -n "$gd" ]; then
+        if   [ -d "$gd/rebase-merge" ] || [ -d "$gd/rebase-apply" ]; then R_FLAGS+=(mid-rebase)
+        elif [ -f "$gd/MERGE_HEAD" ];       then R_FLAGS+=(mid-merge)
+        elif [ -f "$gd/CHERRY_PICK_HEAD" ]; then R_FLAGS+=(mid-cherry-pick)
+        elif [ -f "$gd/REVERT_HEAD" ];      then R_FLAGS+=(mid-revert)
+        elif [ -f "$gd/BISECT_LOG" ];       then R_FLAGS+=(mid-bisect)
+        fi
+    fi
+
+    # A fetch that failed leaves stale refs behind a header that says "fetched".
+    # Naming the repo is the difference between out-of-date and lying.
+    case $'\n'"$FETCH_FAILED"$'\n' in
+        *$'\n'"$d"$'\n'*) R_FLAGS+=(fetch-failed) ;;
+    esac
+
+    local fh; fh=${gd:+$gd/FETCH_HEAD}
+    if [ -n "$fh" ] && [ -f "$fh" ]; then
+        R_FETCH_AGE=$(( ( $(date +%s) - $(mtime "$fh") ) / 86400 ))
+    fi
+    return 0
+}
+
+# Severity: a clone with no copy on the forge breaks the stated rule, so it
+# outranks everything. A github remote and a messy worktree are marks to read.
+rank_status() {
+    local f
+    if [ "$R_FORGE" = no ]; then R_STATUS='!!'; return 0; fi
+    for f in ${R_FLAGS[@]+"${R_FLAGS[@]}"}; do
+        case $f in bitbucket|error) R_STATUS='!!'; return 0 ;; esac
+    done
+    if [ "$R_ISSUE" = 1 ]; then R_STATUS='!'; return 0; fi
+    R_STATUS=ok
+}
+
+# Right-aligned pad, for the numeric columns. Same character-count reason as
+# pad(): printf's own width counts bytes.
+rpad() {
+    local n=$(( $2 - ${#1} ))
+    [ "$n" -gt 0 ] && printf '%*s' "$n" ''
+    printf '%s' "$1"
+    return 0
+}
+# A column of zeros hides the one number that matters, so zero prints as a dot.
+num() { if [ "${1:-0}" -gt 0 ] 2>/dev/null; then printf '%s' "$1"; else printf '.'; fi; }
+
+# --------------------------------------------------------------- run + emit
+declare -a ROWS=()
+N_NOFORGEJO=0 N_NOREMOTES=0 N_BITBUCKET=0 N_GITHUB=0 N_UNCLEAN=0 N_OK=0 MAX_AGE=-1
+declare -a L_NOFORGEJO=() L_BITBUCKET=() L_GITHUB=() L_UNCLEAN=()
+
+for d in "${REPOS[@]}"; do
+    audit_repo "$d"
+    rank_status
+    short=$(tilde "$d")
+    flags=$(join_by ' ' ${R_FLAGS[@]+"${R_FLAGS[@]}"})
+
+    if [ "$R_FORGE" = no ]; then N_NOFORGEJO=$((N_NOFORGEJO+1)); L_NOFORGEJO+=("$short"); fi
+    case " $flags " in *" no-remotes "*) N_NOREMOTES=$((N_NOREMOTES+1)) ;; esac
+    case " $flags " in *" bitbucket "*)  N_BITBUCKET=$((N_BITBUCKET+1)); L_BITBUCKET+=("$short") ;; esac
+    if [ "$R_GH" = yes ]; then N_GITHUB=$((N_GITHUB+1)); L_GITHUB+=("$short"); fi
+    if [ $(( R_MOD + R_DEL + R_ADD + R_UNT + R_CNF )) -gt 0 ] || [ "$R_LBR" -gt 0 ] \
+       || [ "$R_STASH" -gt 0 ] || [ "$R_HEAD" = "(detached)" ]; then
+        N_UNCLEAN=$((N_UNCLEAN+1)); L_UNCLEAN+=("$short")
+    fi
+    [ "$R_STATUS" = ok ] && N_OK=$((N_OK+1))
+    [ "$R_FETCH_AGE" -gt "$MAX_AGE" ] && MAX_AGE=$R_FETCH_AGE
+
+    ROWS+=("$R_STATUS"$'\x1f'"$short"$'\x1f'"$R_ISSUE"$'\x1f'"$R_FORGE"$'\x1f'"$R_GH"$'\x1f'"$R_MOD"$'\x1f'"$R_DEL"$'\x1f'"$R_ADD"$'\x1f'"$R_UNT"$'\x1f'"$R_CNF"$'\x1f'"$R_AHEAD"$'\x1f'"$R_BEHIND"$'\x1f'"$R_LBR"$'\x1f'"$R_LCMT"$'\x1f'"$R_STASH"$'\x1f'"$R_HEAD"$'\x1f'"$flags"$'\x1f'"$R_REMOTES"$'\x1f'"$R_URLS"$'\x1f'"$R_FETCH_AGE")
+done
+
+read_row() {
+    IFS=$'\x1f' read -r F_ST F_REPO F_ISSUE F_FORGE F_GH F_MOD F_DEL F_ADD F_UNT F_CNF \
+        F_AHEAD F_BEHIND F_LBR F_LCMT F_STASH F_HEAD F_NOTES F_REMOTES F_URLS F_AGE <<<"$1"
+}
+
+if [ "$TSV" = 1 ]; then
+    printf '#path\tstatus\tforge\tgithub\tmod\tdel\tadd\tuntracked\tconflicts\tahead\tbehind\tlocal_branches\tlocal_commits\tstash\thead\tnotes\tremotes\tremote_urls\tlast_fetch_days\n'
+    for row in "${ROWS[@]}"; do
+        read_row "$row"
+        [ "$ALL" = 1 ] || [ "$F_ISSUE" = 1 ] || continue
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$F_REPO" "$F_ST" "$F_FORGE" "$F_GH" "$F_MOD" "$F_DEL" "$F_ADD" "$F_UNT" "$F_CNF" \
+            "$F_AHEAD" "$F_BEHIND" "$F_LBR" "$F_LCMT" "$F_STASH" "$F_HEAD" "${F_NOTES:-none}" \
+            "${F_REMOTES:-none}" "${F_URLS:-none}" "$F_AGE"
+    done
+    exit 0
+fi
+
+n=${#REPOS[@]}
+if [ "$MD" = 1 ]; then
+    mdroots=""
+    for r in "${ROOTS[@]}"; do mdroots="${mdroots:+$mdroots, }\`$(tilde "$r")\`"; done
+    printf '**gitpane repo audit** — %d repos under %s  \n' "$n" "$mdroots"
+    [ "$FETCH" = 0 ] && [ "$MAX_AGE" -gt 0 ] && FETCH_STALE=" (oldest is ${MAX_AGE}d old)"
+    printf '_%s%s_\n\n' "$FETCH_NOTE" "$FETCH_STALE"
+    printf 'no-forge **%d** · bitbucket **%d** · github **%d** · unclean **%d** · clean **%d**\n\n' \
+        "$N_NOFORGEJO" "$N_BITBUCKET" "$N_GITHUB" "$N_UNCLEAN" "$N_OK"
+    printf '| | Repo | Forge | GH | Mod | Del | Add | Unt | Cnf | Ahead | Behind | L-BR | L-CMT | Notes |\n'
+    printf '|---|---|:-:|:-:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|\n'
+    # Zero is an empty cell here: markdown aligns for itself, so the dots the
+    # terminal needs would only be visual noise.
+    mdnum() { if [ "${1:-0}" -gt 0 ] 2>/dev/null; then printf '%s' "$1"; fi; }
+    MD_SHOWN=0
+    for row in "${ROWS[@]}"; do
+        read_row "$row"
+        [ "$ALL" = 1 ] || [ "$F_ISSUE" = 1 ] || continue
+        MD_SHOWN=$(( MD_SHOWN + 1 ))
+        mdforge="yes"; [ "$F_FORGE" = no ] && mdforge='**NO**'
+        mdgh="";       [ "$F_GH" = yes ]    && mdgh='yes'
+        # shellcheck disable=SC2016  # the backticks are markdown, not expansion
+        printf '| %s | `%s` | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+            "$F_ST" "$F_REPO" "$mdforge" "$mdgh" \
+            "$(mdnum "$F_MOD")" "$(mdnum "$F_DEL")" "$(mdnum "$F_ADD")" \
+            "$(mdnum "$F_UNT")" "$(mdnum "$F_CNF")" \
+            "$(mdnum "$F_AHEAD")" "$(mdnum "$F_BEHIND")" \
+            "$(mdnum "$F_LBR")" "$(mdnum "$F_LCMT")" "$F_NOTES"
+    done
+    printf '\n_Mod/Del/Add: changed files by kind (renames count as Mod) · Unt: untracked · Cnf: conflicts_  \n'
+    printf '_Ahead/Behind: current branch vs upstream · L-BR/L-CMT: branches and commits that are on no remote_\n'
+    HIDDEN=$(( n - MD_SHOWN ))
+    # shellcheck disable=SC2016  # ditto
+    [ "$HIDDEN" -gt 0 ] && printf '\n_%d clean repos not shown — pass `--all` to list them_\n' "$HIDDEN"
+    exit 0
+fi
+ROOTLIST=""
+for r in "${ROOTS[@]}"; do ROOTLIST="${ROOTLIST:+$ROOTLIST, }$(tilde "$r")"; done
+printf '%sgitpane repo audit%s — %d repos under %s\n' "$C_BLD" "$C_OFF" "$n" "$ROOTLIST"
+# ahead/behind is only as true as the last fetch, so say how old that is rather
+# than let a three-week-old "clean" read as a fresh one.
+[ "$FETCH" = 0 ] && [ "$MAX_AGE" -gt 0 ] && FETCH_STALE=" (oldest is ${MAX_AGE}d old)"
+printf '%s%s%s%s\n\n' "$C_DIM" "$FETCH_NOTE" "$FETCH_STALE" "$C_OFF"
+
+summary() {  # <colour> <label> <count> <name>...
+    local col=$1 label=$2 count=$3; shift 3
+    local detail=""
+    [ $# -gt 0 ] && detail="   $C_DIM$(cap_list 4 ", " "$@")$C_OFF"
+    printf '  %s%-12s%s %3d%s\n' "$col" "$label" "$C_OFF" "$count" "$detail"
+}
+summary "$C_RED" no-forge   "$N_NOFORGEJO" ${L_NOFORGEJO[@]+"${L_NOFORGEJO[@]}"}
+[ "$N_NOREMOTES" -gt 0 ] && printf '  %s%-12s%s %3d%s\n' "$C_DIM" "  of which" "$C_OFF" "$N_NOREMOTES" "  ${C_DIM}have no remote at all$C_OFF"
+summary "$C_RED" bitbucket  "$N_BITBUCKET" ${L_BITBUCKET[@]+"${L_BITBUCKET[@]}"}
+summary "$C_YEL" github     "$N_GITHUB"    ${L_GITHUB[@]+"${L_GITHUB[@]}"}
+summary "$C_YEL" unclean    "$N_UNCLEAN"   ${L_UNCLEAN[@]+"${L_UNCLEAN[@]}"}
+summary "$C_GRN" clean      "$N_OK"
+echo
+
+# Width over the rows that will actually print — a hidden 48-char path must not
+# indent a table it is not in.
+WIDTH=4
+SHOWN=0
+for row in "${ROWS[@]}"; do
+    read_row "$row"
+    [ "$ALL" = 1 ] || [ "$F_ISSUE" = 1 ] || continue
+    SHOWN=$((SHOWN+1))
+    [ ${#F_REPO} -gt "$WIDTH" ] && WIDTH=${#F_REPO}
+done
+
+if [ "$SHOWN" = 0 ]; then
+    printf '  %snothing to report: every tracked repo is on the forge and clean%s\n' "$C_GRN" "$C_OFF"
+    exit 0
+fi
+
+hdr_cell() { printf '%s  ' "$(rpad "$1" "$2")"; }
+printf '%s%s  %s  ' "$C_DIM" "$(pad "" 2)" "$(pad REPO "$WIDTH")"
+printf '%s %s ' "$(pad FORGE 5)" "$(pad GH 3)"
+hdr_cell MOD 3; hdr_cell DEL 3; hdr_cell ADD 3; hdr_cell UNT 3; hdr_cell CNF 3
+printf ' '; hdr_cell AHEAD 5; hdr_cell BEHIND 6
+printf ' '; hdr_cell L-BR 4; hdr_cell L-CMT 5
+printf '  NOTES%s\n' "$C_OFF"
+
+for row in "${ROWS[@]}"; do
+    read_row "$row"
+    [ "$ALL" = 1 ] || [ "$F_ISSUE" = 1 ] || continue
+    case $F_ST in
+        '!!') col=$C_RED ;;
+        '!')  col=$C_YEL ;;
+        *)    col=$C_GRN ;;
+    esac
+    # Colour is applied around an already-padded cell: an escape sequence inside
+    # a printf width would be counted as visible characters and skew the column.
+    printf '%s%s%s  %s  ' "$col" "$(pad "$F_ST" 2)" "$C_OFF" "$(pad "$F_REPO" "$WIDTH")"
+    if [ "$F_FORGE" = yes ]; then printf '%s%s%s ' "$C_GRN" "$(pad yes 5)" "$C_OFF"
+    else                          printf '%s%s%s ' "$C_RED" "$(pad NO 5)"  "$C_OFF"; fi
+    if [ "$F_GH" = yes ]; then    printf '%s%s%s ' "$C_YEL" "$(pad yes 3)" "$C_OFF"
+    else                          printf '%s%s%s ' "$C_DIM" "$(pad . 3)"   "$C_OFF"; fi
+    printf '%s  ' "$(rpad "$(num "$F_MOD")" 3)"
+    printf '%s  ' "$(rpad "$(num "$F_DEL")" 3)"
+    printf '%s  ' "$(rpad "$(num "$F_ADD")" 3)"
+    printf '%s  ' "$(rpad "$(num "$F_UNT")" 3)"
+    if [ "$F_CNF" -gt 0 ]; then printf '%s%s%s  ' "$C_RED" "$(rpad "$F_CNF" 3)" "$C_OFF"
+    else                        printf '%s  ' "$(rpad . 3)"; fi
+    printf ' %s  ' "$(rpad "$(num "$F_AHEAD")" 5)"
+    printf '%s  ' "$(rpad "$(num "$F_BEHIND")" 6)"
+    if [ "$F_LBR" -gt 0 ]; then
+        printf ' %s%s%s  %s%s%s' "$C_YEL" "$(rpad "$F_LBR" 4)" "$C_OFF" \
+                                 "$C_YEL" "$(rpad "$F_LCMT" 5)" "$C_OFF"
+    else
+        printf ' %s  %s' "$(rpad . 4)" "$(rpad . 5)"
+    fi
+    # Separator only when there is something after it, or every clean row ends
+    # in trailing blanks that survive a copy-paste.
+    if [ -n "$F_NOTES" ]; then printf '  %s\n' "$F_NOTES"; else printf '\n'; fi
+done
+
+printf '\n%sMOD/DEL/ADD changed files by kind (renames count as MOD) · UNT untracked · CNF conflicts\n' "$C_DIM"
+printf 'AHEAD/BEHIND current branch vs upstream · L-BR/L-CMT branches and commits that are on no remote%s\n' "$C_OFF"
+HIDDEN=$(( n - SHOWN ))
+[ "$HIDDEN" -gt 0 ] && printf '%s%d clean repos not shown — pass --all to list them%s\n' "$C_DIM" "$HIDDEN" "$C_OFF"
+exit 0

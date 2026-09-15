@@ -22,8 +22,8 @@ ranger/             — ranger file manager config
 claude/             — Claude Code config (settings.json, CLAUDE.md, skills/; symlinked into ~/.claude)
 bin/                — custom scripts (clip, mem, ram-health, ssh-host-setup.sh,
                       zswap-setup.sh, neovide, tmux-snapshot, tmux-restore,
-                      sweep-branches, and the PR review helpers: pr-help,
-                      pr-prep, pr-draft, pr-diff, pr-threads)
+                      sweep-branches, audit-repos, and the PR review helpers:
+                      pr-help, pr-prep, pr-draft, pr-diff, pr-threads)
 bin/lib/            — sourced helpers, not executables (meminfo.sh)
 githooks/           — this repo's own git hooks (commit-msg enforces [job] prefix)
 ```
