@@ -5,18 +5,28 @@ to every project on every machine. Machine-specific instructions do NOT belong
 here — they go in `~/.claude/CLAUDE.machine.md` (untracked), imported at the
 bottom of this file.
 
-## Git: push only on explicit confirmation, unless the repo says otherwise
+## Git: commit and push only on explicit confirmation, unless the repo says otherwise
 
 Before starting work in a repo, fetch the remote(s) and rebase if behind.
-Committing locally when a change is finished is fine. By default do NOT `git push`
-(or otherwise publish or rewrite remote history) unless I explicitly confirm that
-specific push — no standing permission, no pushing "to finish up".
+
+Do NOT `git commit` unless I ask for one. Judging a change "finished" is not a
+reason to commit it, and work I am still giving feedback on is not finished —
+if I am correcting you, the thing is still moving. Leave it in the working tree
+and say it is ready; I will tell you when to commit.
+
+By default do NOT `git push` (or otherwise publish or rewrite remote history)
+unless I explicitly confirm that specific push — no standing permission, no
+pushing "to finish up".
 
 A repo overrides this only by stating its own push policy in its CLAUDE.md or
 AGENTS.md; that statement then wins for that repo. The override has to be an
 explicit policy, not an offhand remark about pushing "automatically" — absent
 one, the default above applies. `sidorenko_dotfiles` has such a policy: anything
 committed there is pushed immediately.
+
+A repo's push policy decides what happens to a commit that exists. It never
+decides whether to make one — "anything committed here is pushed" answers a
+question you may only ask after I have said commit.
 
 ## Git: commit by checking out the branch, never with plumbing
 
