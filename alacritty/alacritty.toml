@@ -72,6 +72,16 @@ duration = 0
 [colors.primary]
 background = "#000000"
 
+# Ctrl+Z off at the source: swallow the key so 0x1A is never sent. The binding
+# that matters is `stty susp undef` in shrc -- that one is what a tty over ssh
+# or mosh obeys, and it is where the reasoning lives. This is the local layer,
+# and it covers the case shrc cannot: a shell that never sourced it (a root
+# shell, a container, a rescue prompt) still cannot be suspended from here.
+[[keyboard.bindings]]
+key = "Z"
+mods = "Control"
+action = "None"
+
 [[keyboard.bindings]]
 key = "N"
 mods = "Control|Shift"

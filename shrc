@@ -81,6 +81,23 @@ __reset_input_modes() {
     printf '\033[?1000l\033[?1002l\033[?1003l\033[?1005l\033[?1006l\033[?1015l\033[?1004l'
 }
 
+# Ctrl+Z off. Suspending is a tty line-discipline feature, not a terminal or
+# multiplexer one: the emulator only sends 0x1A, and the line discipline turns
+# it into SIGTSTP because `susp` is mapped to it. Unmapping it here is what
+# actually disables the key -- and it is the only layer that survives ssh and
+# mosh, where the remote tty is the one making the decision.
+#
+# The reason is long-running TUIs. A stopped process keeps everything -- its
+# pty, its memory, its scrollback -- for as long as its shell lives, while
+# looking exactly like an exited one: the prompt comes back and the window is
+# free. Sessions Ctrl+Z'd weeks ago were still resident, and a replacement
+# started in the same terminal sat next to the original with no sign the first
+# was there.
+#
+# Nothing is lost: `cmd &` still backgrounds, and a multiplexer window is the
+# better answer anyway. To bring it back for one shell: `stty susp '^Z'`.
+[ -t 0 ] && stty susp undef 2>/dev/null
+
 # =============================================================================
 # SHELL SPECIFIC LOGIC
 # =============================================================================
