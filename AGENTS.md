@@ -13,7 +13,7 @@ gitpane.nix         — nix derivation for gitpane (not in nixpkgs); see NIX_LOC
 gitpane/            — gitpane config TEMPLATE, seeded to ~/.config/gitpane (never symlinked)
 tmux.conf           — tmux config; prefix Ctrl+Space, vi keys
 ripgreprc           — global rg flags
-tigrc               — tig config
+tigrc               — tig config; diffs open in git's pager (delta) via bin/tig-diff
 mc.keymap           — Midnight Commander keymap
 alacritty/          — Alacritty terminal config (TOML; alacritty itself installed manually)
 firefox/            — user.js, copied into every Firefox profile (never symlinked)
@@ -22,7 +22,7 @@ ranger/             — ranger file manager config
 claude/             — Claude Code config (settings.json, CLAUDE.md, skills/; symlinked into ~/.claude)
 bin/                — custom scripts (clip, mem, ram-health, ssh-host-setup.sh,
                       zswap-setup.sh, neovide, tmux-snapshot, tmux-restore,
-                      sweep-branches, audit-repos, and the PR review helpers:
+                      sweep-branches, audit-repos, tig-diff, and the PR review helpers:
                       pr-help, pr-prep, pr-draft, pr-diff, pr-threads)
 bin/lib/            — sourced helpers, not executables (meminfo.sh)
 githooks/           — this repo's own git hooks (commit-msg enforces [job] prefix)

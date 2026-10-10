@@ -2,3 +2,25 @@ set wrap-lines = yes
 
 bind status C !git commit --verbose
 bind generic    <C-B>   @sh -c "git notes --ref=bplist add -m 'Pick Me!' %(commit) || git notes --ref=bplist remove %(commit)"
+
+# Diffs open in git's own pager (delta, per gitconfig) instead of tig's diff
+# view, which cannot use an external renderer. The keys that open that view,
+# Enter and d, run bin/tig-diff on the selected row instead, and `>` drops
+# straight back into tig when the pager quits.
+#
+# Enter is rebound view by view, never in `generic`: there it also walks the
+# tree, opens a ref's history and jumps to a grep hit.
+bind generic d       >tig-diff commit %(commit) --status=%(status) --prefix=%(repo:prefix) -- %(fileargs)
+bind main    <Enter> >tig-diff commit %(commit) --status=%(status) --prefix=%(repo:prefix) -- %(fileargs)
+bind log     <Enter> >tig-diff commit %(commit) --status=%(status) --prefix=%(repo:prefix) -- %(fileargs)
+bind reflog  <Enter> >tig-diff commit %(commit) --status=%(status) --prefix=%(repo:prefix) -- %(fileargs)
+bind blame   <Enter> >tig-diff blame %(commit) %(file)
+bind blame   d       >tig-diff blame %(commit) %(file)
+bind status  <Enter> >tig-diff status %(status)
+bind status  d       >tig-diff status %(status)
+bind stash   <Enter> >tig-diff stash %(stash)
+bind stash   d       >tig-diff stash %(stash)
+
+# tig's own views stay one key away: B does what Enter used to — the split diff
+# under the commit list, the stage view (hunk staging) from the status view.
+bind generic B       enter

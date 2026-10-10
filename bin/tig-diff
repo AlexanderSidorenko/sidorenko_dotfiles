@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# tig-diff — show whatever tig has selected through git's own pager.
+#
+# WHY
+#
+# tig paints diffs itself and has no hook for an external renderer, so the delta
+# setup in gitconfig stops at tig's door. tigrc points every key that would open
+# tig's diff view here instead. This runs the plain git command for the selected
+# row and lets git page it exactly as it does on the command line — nothing
+# below names delta; whatever pager.show and pager.diff say is what tig pops into.
+#
+# The work is in telling what "the selected row" is, because tig describes it
+# differently in every view:
+#
+#   - An uncommitted row has no commit. The main view passes an all-zero ID for
+#     it, the blame view the literal "HEAD", and the status view passes "HEAD"
+#     on every row.
+#   - Which uncommitted row it is — staged, unstaged or untracked, one file or
+#     the whole section — is only in %(status) ("Staged changes to <file>"), a
+#     variable tig sets but tigrc(5) does not list. tig also leaves it stale
+#     when the cursor moves back onto a commit, so it is consulted only once
+#     the commit says there is none.
+#
+# Usage (from tigrc):
+#   tig-diff commit <commit> --status=<status> --prefix=<dir> -- [<path>...]
+#   tig-diff blame  <commit> [<file>]
+#   tig-diff status [<status>]
+#   tig-diff stash  <stash>
+#
+#   commit   main, log and reflog views, and d anywhere. <path>... is tig's
+#            %(fileargs) and <dir> its %(repo:prefix), the directory they are
+#            relative to.
+#   blame    blame view; <file> is the file being blamed
+#   status   status view
+#   stash    stash view
+#
+# tig drops an empty variable instead of passing "", so a value that may be
+# empty is either the last argument or spelled --name=%(variable).
+
+set -euo pipefail
+
+SCRATCH=""
+trap '[[ -z "$SCRATCH" ]] || rm -rf "$SCRATCH"' EXIT
+
+die() {
+  printf 'tig-diff: %s\n' "$*" >&2
+  exit 2
+}
+
+# Quitting the pager before git has written everything kills git with SIGPIPE.
+# That is the reader leaving early, not a failure — and tig halts on any
+# non-zero exit to ask for Enter.
+git_paged() {
+  local rc=0
+  git "$@" || rc=$?
+  [[ "$rc" -ne 141 ]] || rc=0
+  return "$rc"
+}
+
+# Untracked files have nothing to diff against until git knows about them. Mark
+# them intent-to-add in a scratch copy of the index — the real one is never
+# written — and they diff as plain additions, through the same pager.
+show_untracked() {
+  local files=() file index
+  while IFS= read -r -d '' file; do
+    files+=("$file")
+  done < <(git ls-files --others --exclude-standard -z -- "$@")
+  [[ "${#files[@]}" -gt 0 ]] || return 0
+
+  index="$(git rev-parse --git-path index)"
+  SCRATCH="$(mktemp -d)"
+  [[ ! -f "$index" ]] || cp "$index" "$SCRATCH/index"
+  export GIT_INDEX_FILE="$SCRATCH/index"
+  git --literal-pathspecs add --intent-to-add -- "${files[@]}"
+  git_paged --literal-pathspecs diff -- "${files[@]}"
+}
+
+# show_uncommitted <status> [<path>...] — <status> is tig's %(status). Anything
+# it does not name a section for gets every uncommitted change at once.
+show_uncommitted() {
+  local status="$1"
+  shift
+  case "$status" in
+  "Staged changes"*) git_paged diff --cached -- "$@" ;;
+  "Unstaged changes"*) git_paged diff -- "$@" ;;
+  "Untracked file"*) show_untracked "$@" ;;
+  *) git_paged diff HEAD -- "$@" ;;
+  esac
+}
+
+is_null_id() { [[ "$1" =~ ^0+$ ]]; }
+
+mode="${1-}"
+[[ "$#" -eq 0 ]] || shift
+
+case "$mode" in
+commit)
+  [[ "$#" -gt 0 ]] || die "commit: no commit given"
+  commit="$1"
+  shift
+  status=""
+  prefix=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+    --status=*) status="${1#--status=}" ;;
+    --prefix=*) prefix="${1#--prefix=}" ;;
+    --)
+      shift
+      break
+      ;;
+    *) die "commit: unexpected argument '$1'" ;;
+    esac
+    shift
+  done
+  # tig runs this from the top of the work tree, but the paths are the ones
+  # typed on its command line — relative to the directory it was started in.
+  [[ "$#" -eq 0 || -z "$prefix" ]] || cd -- "$prefix"
+
+  if is_null_id "$commit"; then
+    show_uncommitted "$status" "$@"
+  else
+    git_paged show "$commit" -- "$@"
+  fi
+  ;;
+
+blame)
+  [[ "$#" -gt 0 ]] || die "blame: no commit given"
+  commit="$1"
+  shift
+  # A line that is not committed yet blames to "HEAD", and what there is to
+  # show for it is what the blamed file holds beyond HEAD.
+  if [[ "$commit" == HEAD ]] || is_null_id "$commit"; then
+    git_paged --literal-pathspecs diff HEAD -- "$@"
+  else
+    git_paged show "$commit"
+  fi
+  ;;
+
+status)
+  status="${1-}"
+  paths=()
+  case "$status" in
+  *" changes to "*) paths=("${status#* changes to }") ;;
+  "Untracked file "?*) paths=("${status#Untracked file }") ;;
+  esac
+  # These are file names tig got from git itself, never patterns.
+  export GIT_LITERAL_PATHSPECS=1
+  show_uncommitted "$status" ${paths[@]+"${paths[@]}"}
+  ;;
+
+stash)
+  [[ "$#" -gt 0 ]] || die "stash: no stash given"
+  git_paged stash show --patch "$1"
+  ;;
+
+-h | --help)
+  sed -n '/^# Usage/,/^# empty is either/p' "$0" | sed 's/^# \{0,1\}//'
+  ;;
+
+*)
+  die "unknown mode '${mode}' (see --help)"
+  ;;
+esac
