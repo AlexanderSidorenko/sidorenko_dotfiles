@@ -34,7 +34,13 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/sidorenko-dotfiles-vmtest"
 RELEASE="noble"
+# 4 GiB is plenty to place dotfiles, but NOT to install the package set:
+# `nix-env -iA` with ~64 attributes evaluates a large slice of nixpkgs and was
+# measured at ~3.3 GiB RSS, which the guest OOM-killer ended at 4 GiB. Raised
+# to 8 GiB by --packages below. Worth knowing beyond this harness: a 2 GiB VPS
+# cannot run `install.sh --packages` at all.
 MEM=4096
+MEM_WITH_PACKAGES=8192
 CPUS=4
 DISK_SIZE="20G"
 WITH_PACKAGES=0
@@ -49,13 +55,14 @@ die()  { printf '\033[31m[ubuntu-vm]\033[0m ERROR: %s\n' "$*" >&2; exit 1; }
 
 usage() { sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0; }
 
+MEM_SET=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --packages)  WITH_PACKAGES=1 ;;
     --keep)      KEEP=1 ;;
     --shell)     DROP_SHELL=1; KEEP=1 ;;
     --release)   RELEASE="$2"; shift ;;
-    --mem)       MEM="$2"; shift ;;
+    --mem)       MEM="$2"; MEM_SET=1; shift ;;
     --cpus)      CPUS="$2"; shift ;;
     --timeout)   TIMEOUT="$2"; shift ;;
     -h|--help)   usage ;;
@@ -67,6 +74,11 @@ done
 # ---------------------------------------------------------------------------
 # Preconditions, checked up front with actionable messages
 # ---------------------------------------------------------------------------
+# Default memory depends on the mode; an explicit --mem always wins.
+if (( WITH_PACKAGES && ! MEM_SET )); then
+  MEM="$MEM_WITH_PACKAGES"
+fi
+
 [[ -r /dev/kvm && -w /dev/kvm ]] || die "/dev/kvm is not read-write for this user.
   Virtualization must be enabled in firmware and the kvm module loaded.
   Check:  grep -oE 'svm|vmx' /proc/cpuinfo | sort -u ; ls -l /dev/kvm"
@@ -228,13 +240,35 @@ INSTALL_RC=${PIPESTATUS[0]}
 set -e
 log "install.sh exited ${INSTALL_RC} (log: ${WORK}/install.log)"
 if (( INSTALL_RC != 0 )); then
-  warn "install.sh FAILED (exit ${INSTALL_RC}); the verifier below shows what is missing."
-  # Nix's "copying path" chatter can be thousands of lines and buries the
-  # actual error, so show the tail with that noise stripped. Without this the
-  # log ends in store paths and says nothing about what went wrong.
+  warn "install.sh FAILED (exit ${INSTALL_RC})."
+
+  # LOOK IN THE GUEST KERNEL FIRST. The cause is often invisible in the
+  # installer's own output: an OOM kill or a full disk happens underneath it,
+  # so install.sh's log simply stops mid-sentence and explains nothing. That
+  # is exactly how a 4 GiB VM failed here — the only evidence anywhere was one
+  # line on the serial console:
+  #
+  #   Out of memory: Killed process 4014 (nix-env) ... anon-rss:3251396kB
+  #
+  # so this is checked before anything else, and named as a harness problem
+  # rather than left looking like a bug in the thing under test.
+  if oom="$(grep -iE 'Out of memory: Killed process|oom-kill:' "${WORK}/console.log" 2>/dev/null | tail -3)"; then
+    if [[ -n $oom ]]; then
+      warn "THE GUEST RAN OUT OF MEMORY — this is a harness sizing problem, not install.sh:"
+      sed 's/^/              /' <<<"$oom" >&2
+      warn "Re-run with more memory, e.g.: ${BASH_SOURCE[0]} --mem $(( MEM * 2 )) ${*}"
+    fi
+  fi
+  if grep -qiE 'No space left on device' "${WORK}/console.log" "${WORK}/install.log" 2>/dev/null; then
+    warn "THE GUEST RAN OUT OF DISK — raise DISK_SIZE (currently ${DISK_SIZE})."
+  fi
+
+  # Then the installer's own tail. Nix's "copying path" chatter runs to
+  # thousands of lines and buries any real error, so strip it.
   warn "last lines of install.log, nix fetch noise removed:"
   grep -vE "copying path|^\s+/nix/store|^\s*$" "${WORK}/install.log" |
     tail -15 | sed 's/^/              /' >&2
+  warn "the verifier below shows what is missing as a result."
 fi
 
 # ---------------------------------------------------------------------------

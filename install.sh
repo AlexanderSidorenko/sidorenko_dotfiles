@@ -54,6 +54,16 @@ DO_NIX=1               # install Nix itself if absent
 DO_PACKAGES=auto       # auto = ask (or default) | yes | no
 DO_APT=1               # apt/PPA packages and Obsidian
 
+# Steps that failed but were not fatal. Interactively, warning and carrying on
+# is right: you can see the warning and decide. Unattended it is NOT — an exit
+# code of 0 after "Nix package installation failed" tells a test harness the
+# install succeeded, and that is exactly what happened here: the VM test went
+# green on INSTALL_RC=0 while 64 packages were missing, and only the separate
+# measurement step caught it. So non-interactive runs exit non-zero if any step
+# failed, while interactive behaviour is unchanged.
+SOFT_FAILURES=()
+note_failure() { SOFT_FAILURES+=("$1"); }
+
 # ---------- colors ----------
 C_RESET=$'\033[0m'
 C_GREEN=$'\033[32m'
@@ -664,6 +674,7 @@ maybe_configure_gnome() {
     log "GNOME tweaks applied. Log out and back in for all changes to take effect."
   else
     warn "Some GNOME preferences failed to apply (see above)."
+    note_failure "GNOME preferences"
   fi
 }
 
@@ -810,6 +821,7 @@ print(entry["pk"] if entry else "")' "$shell_major" 2>/dev/null || true)"
       configure_memory_monitor
     else
       warn "gnome-extensions install failed for Astra Monitor."
+      note_failure "GNOME extension (Astra Monitor)"
     fi
   else
     warn "Could not download Astra Monitor from extensions.gnome.org."
@@ -861,6 +873,7 @@ install_nvim_plugins() {
     log "nvim plugin restore complete."
   else
     warn "nvim plugin restore failed; you can run :Lazy restore manually."
+    note_failure "nvim plugin restore"
     printf '%s\n' "$output" >&2
   fi
 }
@@ -957,6 +970,7 @@ maybe_install_nix() {
     log "Nix installed."
   else
     warn "Nix installation failed (see output above)."
+    note_failure "Nix installation"
   fi
 }
 
@@ -978,6 +992,7 @@ maybe_install_claude_bin() {
     log "Claude Code installed. Authenticate with: $(name "claude") then /login"
   else
     warn "Claude Code installation failed (see output above)."
+    note_failure "Claude Code installation"
   fi
 }
 
@@ -999,6 +1014,7 @@ install_nix_packages() {
     log "Nix package installation complete."
   else
     warn "Nix package installation failed (see output above)."
+    note_failure "Nix package installation"
   fi
 }
 
@@ -1094,6 +1110,23 @@ main() {
     maybe_install_extra_packages
   else
     log "Skipping apt/PPA packages and Obsidian (--no-apt)."
+  fi
+
+  if (( ${#SOFT_FAILURES[@]} )); then
+    warn "Finished, but these steps FAILED:"
+    local f
+    for f in "${SOFT_FAILURES[@]}"; do
+      warn "  - ${f}"
+    done
+    if (( INTERACTIVE )); then
+      warn "Each is recoverable; re-run after fixing, or see the output above."
+    else
+      # Unattended: the exit code is the only thing a caller sees, so it must
+      # not say success. Interactive runs keep exiting 0 — you read the warning
+      # and decide for yourself.
+      warn "Exiting non-zero because this was a non-interactive run."
+      return 1
+    fi
   fi
 
   log "sidorenko_dotfiles successfully installed!"
