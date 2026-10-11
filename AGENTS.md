@@ -15,9 +15,10 @@ nix/                — the Nix-side face: home.nix (home-manager module) and
                       install.sh; a machine without Nix is unaffected
 flake.nix           — exports nix/home.nix + packages.gitpane; how a NixOS host
                       consumes this repo as a pinned input
-tests/              — ubuntu-vm.sh: boots a CLEAN Ubuntu cloud image under
+tests/              — ubuntu-vm.sh boots a CLEAN Ubuntu cloud image under
                       QEMU/KVM, runs install.sh unattended, then measures the
-                      result with manifests/verify-applied.sh
+                      result with manifests/verify-applied.sh; compare-platforms.sh
+                      diffs an Ubuntu run against a NixOS one
 shrc                — unified shell config sourced by both bash and zsh
 gitconfig           — git defaults (delta, nvim, moor pager)
 gitconfig.personal  — optional personal identity include
@@ -133,7 +134,24 @@ nix shell nixpkgs#qemu nixpkgs#cloud-utils nixpkgs#openssh nixpkgs#curl nixpkgs#
 
 # NixOS: a nixosTest living in the consuming repo, which imports nix/home.nix
 nix build <it_infra>#checks.x86_64-linux.desktop-dotfiles
+
+# Then compare the two runs on the checks they share
+./tests/compare-platforms.sh
 ```
+
+`compare-platforms.sh` is what makes "both platforms run the same checks" a
+testable claim rather than an assertion. It exits non-zero only on a real
+divergence — something that PASSES on one platform and FAILS on the other.
+`PASS` vs `SKIP` is reported but not fatal, because it is usually legitimate:
+a headless cloud image has no GNOME schemas, and five gsettings rows are
+tagged `no-nixos` precisely because modules in the consuming repo own those
+keys there. Last run: 22 checks pass on both, no divergence.
+
+Note the two harnesses read different trees, deliberately. `ubuntu-vm.sh` uses
+the **live working tree** (read-only 9p), so it is the one to iterate with.
+The nixosTest uses the **pinned flake input**, because a `nix flake check`
+entry has to be hermetic and a pure evaluation cannot read a working tree at
+all — so it only sees work that is committed *and* re-locked.
 
 `manifests/verify-applied.sh` is the measurement half, and is deliberately
 separate from the appliers: `apply-links.sh` reporting "12 linked" says what it
