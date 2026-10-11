@@ -227,7 +227,15 @@ in_vm "cd ~/.sidorenko_dotfiles && timeout ${TIMEOUT} ./install.sh ${INSTALL_FLA
 INSTALL_RC=${PIPESTATUS[0]}
 set -e
 log "install.sh exited ${INSTALL_RC} (log: ${WORK}/install.log)"
-(( INSTALL_RC == 0 )) || warn "install.sh failed; the verifier below will show what is missing"
+if (( INSTALL_RC != 0 )); then
+  warn "install.sh FAILED (exit ${INSTALL_RC}); the verifier below shows what is missing."
+  # Nix's "copying path" chatter can be thousands of lines and buries the
+  # actual error, so show the tail with that noise stripped. Without this the
+  # log ends in store paths and says nothing about what went wrong.
+  warn "last lines of install.log, nix fetch noise removed:"
+  grep -vE "copying path|^\s+/nix/store|^\s*$" "${WORK}/install.log" |
+    tail -15 | sed 's/^/              /' >&2
+fi
 
 # ---------------------------------------------------------------------------
 # Measure

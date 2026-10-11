@@ -205,13 +205,45 @@ fi
 # Deliberately checks commands rather than "did the package manager claim
 # success": the thing that matters is whether the tool runs. bin:/nobin tags in
 # packages.txt carry the package -> command mapping.
+#
+# CHECKED AGAINST THE PATH A USER ACTUALLY GETS, not this script's own. That
+# distinction is the whole check on Ubuntu: nix-env installs into
+# ~/.nix-profile/bin, which joins PATH only when a shell sources shrc (or
+# nix's profile.d). This script is typically invoked over a NON-interactive ssh
+# command, where neither has happened — so an earlier version reported all 52
+# nix-installed tools as "not on PATH" on a machine where every one of them
+# worked fine in a real terminal. It passed on NixOS only by accident, because
+# there home.packages land on the global system PATH.
+#
+# So: ask an interactive shell for its PATH once, then resolve against that.
+# One shell spawn rather than one per package.
 if ! skipped_cat packages; then
+  user_path=""
+  path_source="this script's PATH"
+  for sh in "${SHELL:-}" bash zsh; do
+    [[ -n $sh ]] && command -v "$sh" >/dev/null 2>&1 || continue
+    probe="$("$sh" -ic 'printf "\nSDFPATH:%s:END\n" "$PATH"' 2>/dev/null |
+             grep -o 'SDFPATH:.*:END' | tail -1)"
+    if [[ -n $probe ]]; then
+      user_path="${probe#SDFPATH:}"; user_path="${user_path%:END}"
+      path_source="interactive ${sh##*/}"
+      break
+    fi
+  done
+  if [[ -z $user_path ]]; then
+    user_path="$PATH"
+    emit SKIP packages "(path)" "could not read an interactive PATH; using this script's"
+  else
+    emit PASS packages "(path)" "resolving against the ${path_source} PATH"
+  fi
+
   while IFS= read -r cmd; do
     [[ -n $cmd ]] || continue
-    if command -v "$cmd" >/dev/null 2>&1; then
-      emit PASS packages "$cmd" "$(command -v "$cmd")"
+    # Subshell so the PATH override cannot leak into later checks.
+    if found="$(PATH="$user_path" command -v "$cmd" 2>/dev/null)" && [[ -n $found ]]; then
+      emit PASS packages "$cmd" "$found"
     else
-      emit FAIL packages "$cmd" "not on PATH"
+      emit FAIL packages "$cmd" "not found on the ${path_source} PATH"
     fi
   done < <(manifest_binaries "${HERE}/packages.txt" "${GATES[@]}")
 fi
