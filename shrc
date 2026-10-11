@@ -365,21 +365,18 @@ dotfiles_doctor() {
   # added to it. The bin:/nobin tags in packages.txt carry the package ->
   # command mapping (neovim -> nvim, ripgrep -> rg, plugins -> skipped).
   local tools=()
-  local __d
-  if __d="$(it_infra_dotfiles 2>/dev/null)" && [[ -r "${__d}/manifest-lib.sh" ]]; then
+  local __d="${SIDORENKO_DOTFILES:-$HOME/.sidorenko_dotfiles}/manifests"
+  if [[ -r "${__d}/manifest-lib.sh" && -r "${__d}/packages.txt" ]]; then
     . "${__d}/manifest-lib.sh"
-    local __gui=--no-gui
-    has_gui && __gui=--gui
-    mapfile -t tools < <(
-      manifest_binaries "${__d}/packages.txt" \
-        --platform "$(uname | tr '[:upper:]' '[:lower:]')" "$__gui" \
-        $([[ -e /etc/NIXOS ]] && printf '%s' --nixos || printf '%s' --no-nixos)
-    )
+    local -a __args=(--platform "$(uname | tr '[:upper:]' '[:lower:]')")
+    if has_gui; then __args+=(--gui); else __args+=(--no-gui); fi
+    if [[ -e /etc/NIXOS ]]; then __args+=(--nixos); else __args+=(--no-nixos); fi
+    mapfile -t tools < <(manifest_binaries "${__d}/packages.txt" "${__args[@]}")
   fi
 
   if (( ${#tools[@]} == 0 )); then
-    printf 'dotfiles_doctor: cannot read the package manifest.\n' >&2
-    it_infra_require >/dev/null
+    printf 'dotfiles_doctor: cannot read %s/packages.txt — incomplete checkout?\n' \
+      "$__d" >&2
     return 1
   fi
 

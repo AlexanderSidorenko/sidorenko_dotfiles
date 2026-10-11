@@ -1,0 +1,76 @@
+# Where each dotfile goes. ONE source of truth for both platforms.
+#
+# Consumed by ./apply-links.sh, which is called from BOTH
+#   ../install.sh     (Ubuntu / macOS, run by hand)
+#   ../nix/home.nix   (NixOS, at home-manager activation)
+#
+# so the placement logic exists once, in one language, and this table is the
+# only place that says where anything lands.
+#
+# FORMAT
+#   <kind>  <source>  <target>  [comma,tags]
+#
+#   source — relative to the dotfiles repo root ($SIDORENKO_DOTFILES)
+#   target — relative to $HOME
+#
+# KINDS
+#   link            symlink  $HOME/<target>  ->  <repo>/<source>
+#   link-children   for EACH child of <source>, symlink $HOME/<target>/<child>.
+#                   Deliberately NOT a directory symlink: see the ~/.claude note
+#                   below, this distinction is load-bearing and not cosmetic.
+#   shell-source    make the login shells source <source>. <target> is a
+#                   comma-separated list of rc files to wire up.
+#   git-include     add an [include] path = <source> stanza to <target>.
+#   ssh-include     add `Include <source>` to <target>, kept LAST in the file —
+#                   OpenSSH keeps the FIRST value it sees for an option, so a
+#                   `Host *` block included at the top would beat every
+#                   per-host block below it.
+#   firefox-user-js copy <source> into every Firefox profile found. Cannot be a
+#                   static row target: profile directory names are random.
+#
+# TAGS
+#   gui         skip when there is no graphical session
+#   no-nixos    skip on NixOS — something native handles it there instead
+#   nixos-only  apply only on NixOS
+
+# --- Shell -----------------------------------------------------------------
+# One file drives bash and zsh both; it also puts <repo>/bin on PATH and points
+# RIPGREP_CONFIG_PATH / TIGRC_USER at the in-repo copies, which is why ripgreprc
+# and tigrc need no rows of their own.
+shell-source    shrc                    .bashrc,.zshrc
+
+# --- Git -------------------------------------------------------------------
+git-include     gitconfig               .gitconfig
+git-include     gitconfig.personal      .gitconfig
+
+# --- SSH -------------------------------------------------------------------
+ssh-include     ssh_config              .ssh/config
+
+# --- Terminal / editors ----------------------------------------------------
+link            tmux.conf               .tmux.conf
+link            nvim                    .config/nvim
+link-children   ranger                  .config/ranger
+link-children   alacritty               .config/alacritty
+link            mc.keymap               .config/mc/mc.keymap
+link            gitpane/config.toml     .config/gitpane/config.toml
+
+# --- Claude ----------------------------------------------------------------
+# link-children, NEVER link. ~/.claude is a LIVE STATE DIRECTORY: it holds
+# projects/, sessions/, shell-snapshots/, history.jsonl and .credentials.json
+# alongside the three tracked files. Replacing it with one directory symlink
+# would put all of that inside the dotfiles repo — and an earlier accident in
+# the other direction (an rsync that dumped it_infra into ~) is exactly how
+# much fun that class of mistake is to clean up. Only CLAUDE.md, settings.json
+# and skills/ are ours; everything else in there belongs to the harness.
+link-children   claude                  .claude
+
+# --- Firefox ---------------------------------------------------------------
+firefox-user-js firefox/user.js         -                       gui
+
+# --- Fonts -----------------------------------------------------------------
+# Ubuntu copies the OTF into the user font dir and runs fc-cache. On NixOS
+# ../nix/home.nix installs pkgs.nerd-fonts.droid-sans-mono instead, which is why
+# the Linux row is no-nixos — the font is still there, just packaged rather
+# than copied, with no font cache to get stale.
+copy            DroidSansMNerdFont-Regular.otf  .local/share/fonts/DroidSansMNerdFont-Regular.otf  gui,linux,no-nixos
+copy            DroidSansMNerdFont-Regular.otf  Library/Fonts/DroidSansMNerdFont-Regular.otf       gui,darwin

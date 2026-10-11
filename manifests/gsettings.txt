@@ -1,0 +1,154 @@
+# GNOME/GSettings desktop preferences. ONE source of truth for both platforms.
+#
+# Consumed by ./apply-gsettings.sh, called from BOTH
+#   ../install.sh     (Ubuntu / macOS, run by hand)
+#   ../nix/home.nix   (NixOS, as a graphical-session user unit)
+#
+# FORMAT
+#   <schema>  <key>  <value>
+#
+# <value> is the REST of the line and is a GVariant literal exactly as
+# `gsettings set` wants it: strings carry their own quotes ('RIGHT'), arrays
+# use brackets (['<Super>1']), booleans and integers are bare.
+#
+# WHY NOT dconf.settings / typed Nix. home-manager's dconf module takes typed
+# Nix values, which would mean translating every GVariant literal above into a
+# Nix type — i.e. writing a GVariant parser in Nix, and maintaining it. Running
+# the same `gsettings set` calls on both platforms needs no translation layer
+# at all, so the value text below is simultaneously what Ubuntu applies and
+# what NixOS applies. The cost is that this layer is imperative on NixOS too;
+# it is a desktop preference, it is idempotent, and it reapplies at every
+# login, so that cost is small and the alternative was a parser.
+#
+# TAGS
+#   no-nixos    a NixOS module owns this key natively — see each note
+
+# --- Workspaces: fixed set of 4, spanning all monitors ---------------------
+org.gnome.mutter                     dynamic-workspaces           false
+org.gnome.desktop.wm.preferences     num-workspaces               4
+org.gnome.mutter                     workspaces-only-on-primary   false
+org.gnome.shell.app-switcher         current-workspace-only       true
+
+# Super+1..4 switches workspace; Alt+1..4 moves the window there.
+org.gnome.desktop.wm.keybindings     switch-to-workspace-1        ['<Super>1']
+org.gnome.desktop.wm.keybindings     switch-to-workspace-2        ['<Super>2']
+org.gnome.desktop.wm.keybindings     switch-to-workspace-3        ['<Super>3']
+org.gnome.desktop.wm.keybindings     switch-to-workspace-4        ['<Super>4']
+org.gnome.desktop.wm.keybindings     move-to-workspace-1          ['<Alt>1']
+org.gnome.desktop.wm.keybindings     move-to-workspace-2          ['<Alt>2']
+org.gnome.desktop.wm.keybindings     move-to-workspace-3          ['<Alt>3']
+org.gnome.desktop.wm.keybindings     move-to-workspace-4          ['<Alt>4']
+
+# Alt+drag moves windows, Alt+right-drag resizes them.
+org.gnome.desktop.wm.preferences     mouse-button-modifier        '<Alt>'
+
+# Free Super+N and the dock's N-hotkeys so the workspace bindings above win.
+# Cleared through 9, not 4, so raising num-workspaces later needs no edit here.
+org.gnome.shell.keybindings          switch-to-application-1      []
+org.gnome.shell.keybindings          switch-to-application-2      []
+org.gnome.shell.keybindings          switch-to-application-3      []
+org.gnome.shell.keybindings          switch-to-application-4      []
+org.gnome.shell.keybindings          switch-to-application-5      []
+org.gnome.shell.keybindings          switch-to-application-6      []
+org.gnome.shell.keybindings          switch-to-application-7      []
+org.gnome.shell.keybindings          switch-to-application-8      []
+org.gnome.shell.keybindings          switch-to-application-9      []
+
+# --- Dock: right edge, auto-hiding, per-workspace ---------------------------
+# dash-to-dock on Ubuntu; absent on stock GNOME, where these are simply
+# non-writable and apply-gsettings.sh skips them.
+org.gnome.shell.extensions.dash-to-dock hot-keys                  false
+org.gnome.shell.extensions.dash-to-dock app-hotkey-1              []
+org.gnome.shell.extensions.dash-to-dock app-hotkey-2              []
+org.gnome.shell.extensions.dash-to-dock app-hotkey-3              []
+org.gnome.shell.extensions.dash-to-dock app-hotkey-4              []
+org.gnome.shell.extensions.dash-to-dock app-hotkey-5              []
+org.gnome.shell.extensions.dash-to-dock app-hotkey-6              []
+org.gnome.shell.extensions.dash-to-dock app-hotkey-7              []
+org.gnome.shell.extensions.dash-to-dock app-hotkey-8              []
+org.gnome.shell.extensions.dash-to-dock app-hotkey-9              []
+org.gnome.shell.extensions.dash-to-dock app-shift-hotkey-1        []
+org.gnome.shell.extensions.dash-to-dock app-shift-hotkey-2        []
+org.gnome.shell.extensions.dash-to-dock app-shift-hotkey-3        []
+org.gnome.shell.extensions.dash-to-dock app-shift-hotkey-4        []
+org.gnome.shell.extensions.dash-to-dock app-shift-hotkey-5        []
+org.gnome.shell.extensions.dash-to-dock app-shift-hotkey-6        []
+org.gnome.shell.extensions.dash-to-dock app-shift-hotkey-7        []
+org.gnome.shell.extensions.dash-to-dock app-shift-hotkey-8        []
+org.gnome.shell.extensions.dash-to-dock app-shift-hotkey-9        []
+org.gnome.shell.extensions.dash-to-dock app-ctrl-hotkey-1         []
+org.gnome.shell.extensions.dash-to-dock app-ctrl-hotkey-2         []
+org.gnome.shell.extensions.dash-to-dock app-ctrl-hotkey-3         []
+org.gnome.shell.extensions.dash-to-dock app-ctrl-hotkey-4         []
+org.gnome.shell.extensions.dash-to-dock app-ctrl-hotkey-5         []
+org.gnome.shell.extensions.dash-to-dock app-ctrl-hotkey-6         []
+org.gnome.shell.extensions.dash-to-dock app-ctrl-hotkey-7         []
+org.gnome.shell.extensions.dash-to-dock app-ctrl-hotkey-8         []
+org.gnome.shell.extensions.dash-to-dock app-ctrl-hotkey-9         []
+org.gnome.shell.extensions.dash-to-dock dock-position             'RIGHT'
+org.gnome.shell.extensions.dash-to-dock dock-fixed                false
+org.gnome.shell.extensions.dash-to-dock autohide                  true
+org.gnome.shell.extensions.dash-to-dock intellihide               true
+org.gnome.shell.extensions.dash-to-dock isolate-workspaces        true
+
+# --- Appearance -------------------------------------------------------------
+org.gnome.desktop.interface          enable-animations            false
+org.gnome.desktop.interface          color-scheme                 'prefer-dark'
+org.gnome.desktop.interface          show-battery-percentage      true
+org.gnome.shell.extensions.tiling-assistant active-window-hint-color 'rgb(211,70,21)'
+
+# --- Power ------------------------------------------------------------------
+# idle-delay / sleep-inactive-* are tagged no-nixos because the consuming host's no-sleep.nix
+# owns them on this host, and there it is not a preference — the drive sits in
+# an OPAL locking range that relocks on power loss, so a suspend underneath a
+# running kernel is data loss. That module masks the sleep targets outright and
+# sets these same GNOME keys; letting this file write them too would mean two
+# writers for one safety-critical setting, and the quieter one winning by
+# accident. The values happen to agree today, which is exactly how such a
+# conflict stays invisible until it does not.
+org.gnome.desktop.session            idle-delay                   0          no-nixos
+org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type    'nothing'  no-nixos
+org.gnome.settings-daemon.plugins.power sleep-inactive-ac-timeout 3600       no-nixos
+org.gnome.settings-daemon.plugins.power sleep-inactive-battery-timeout 7200  no-nixos
+org.gnome.settings-daemon.plugins.power ambient-enabled           false
+
+# --- Notifications ----------------------------------------------------------
+org.gnome.desktop.notifications      show-banners                 false
+org.gnome.desktop.notifications      show-in-lock-screen          false
+
+# --- Touchpad: traditional scroll, two-finger right-click -------------------
+org.gnome.desktop.peripherals.touchpad natural-scroll             false
+org.gnome.desktop.peripherals.touchpad click-method               'fingers'
+
+# --- Display: fractional scaling (HiDPI) ------------------------------------
+# no-nixos, and NOT because something else owns the key — because on this host
+# the value itself is invalid. the consuming host's desktop-env.nix records that Mutter 50.4's
+# schema accepts only `kms-modifiers` and `autoclose-xwayland`:
+# scale-monitor-framebuffer GRADUATED into an ordinary Settings -> Displays
+# toggle and was removed from the enum. Setting it here would fail at runtime
+# on GNOME 50 and is simply unnecessary.
+#
+# Kept (rather than deleted) because this file is shared, and the Ubuntu boxes
+# still run GNOME 46/47 where the flag is both valid and required for
+# fractional scaling. Revisit when those reach GNOME 50.
+org.gnome.mutter                     experimental-features        ['scale-monitor-framebuffer']  no-nixos
+
+# --- Files ------------------------------------------------------------------
+org.gnome.nautilus.preferences       default-folder-viewer        'list-view'
+org.gtk.gtk4.Settings.FileChooser    show-hidden                  true
+
+# --- Keyboard ---------------------------------------------------------------
+org.gnome.desktop.peripherals.keyboard numlock-state              false
+
+# Snappy key repeat: 195 ms before the first repeat, 15 ms between repeats.
+# These were a separate hand-rolled block in install.sh (configure_key_repeat_*)
+# that read each key, compared, and set it — i.e. this script's whole job done
+# a second time for two keys. The macOS half genuinely cannot live here: it
+# uses `defaults write -g InitialKeyRepeat` in 15 ms ticks rather than
+# GSettings in milliseconds, so install.sh keeps that part.
+#
+# Both values are uint32, which is why `gsettings get` prints them as
+# "uint32 195" and why this script normalises type annotations before
+# comparing.
+org.gnome.desktop.peripherals.keyboard delay                      195
+org.gnome.desktop.peripherals.keyboard repeat-interval            15

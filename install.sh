@@ -3,17 +3,17 @@
 #
 # WHAT MOVED, and why this file got ~450 lines shorter. The questions "which
 # packages", "where does each dotfile go" and "which GSettings keys" are now
-# answered by three manifests in the it_infra repo:
+# answered by three manifests in ./manifests/:
 #
-#   it_infra/desktop/nixos/dotfiles/packages.txt
-#   it_infra/desktop/nixos/dotfiles/links.txt
-#   it_infra/desktop/nixos/dotfiles/gsettings.txt
+#   manifests/packages.txt
+#   manifests/links.txt
+#   manifests/gsettings.txt
 #
 # with two shared appliers beside them, apply-links.sh and apply-gsettings.sh,
-# that THIS script and it_infra's NixOS home.nix both call. Before that, this
-# file had its own symlink/copy/gsettings logic and its own package array,
-# duplicating what the NixOS side declared separately — and they had already
-# drifted (the NixOS side was missing git-lfs).
+# that THIS script and the NixOS module in ./nix/home.nix both call. Before
+# that, this file had its own symlink/copy/gsettings logic and its own package
+# array, duplicating what a consuming NixOS host declared separately — and they
+# had already drifted (the NixOS side was missing git-lfs).
 #
 # So the per-app installers that used to live here (install_tmux,
 # install_ranger, install_alacritty, install_claude, install_gitpane,
@@ -29,14 +29,17 @@
 # marker-block injections into ~/.bashrc / ~/.zshrc / ~/.gitconfig (on NixOS
 # home-manager owns those files, so they cannot be appended to there).
 #
-# REQUIRES the it_infra clone. See ./it-infra-path.sh for the search order and
-# the trade that implies.
+# STANDALONE. This repo needs nothing but itself: the manifests live in
+# ./manifests/ and so does the logic that applies them. An earlier version put
+# them in the consuming it_infra repo and reached into it from here, which
+# meant a fresh Ubuntu box needed two clones before this script could place a
+# single file. The dependency now points the other way — a NixOS consumer takes
+# THIS repo as a pinned flake input (see ./flake.nix) and imports
+# ./nix/home.nix. Nothing in this repo knows that consumer exists.
 set -euo pipefail
 
 DOTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# shellcheck source=./it-infra-path.sh
-. "${DOTDIR}/it-infra-path.sh"
+MANIFEST_DIR="${DOTDIR}/manifests"
 
 # ---------- colors ----------
 C_RESET=$'\033[0m'
@@ -122,35 +125,35 @@ rm_path() {
 # facts that belong in the manifest, so they are read from it here instead of
 # being written down a second time.
 
+# Sourced once; defines manifest_links / manifest_packages / manifest_binaries.
+# shellcheck source=./manifests/manifest-lib.sh
+. "${MANIFEST_DIR}/manifest-lib.sh"
+
+# Rows of one kind, as the non-NixOS platform sees them.
+_manifest_rows_of_kind() {
+  manifest_links "${MANIFEST_DIR}/links.txt" --no-nixos |
+    awk -F'\t' -v k="$1" '$1==k'
+}
+
 # Print the repo-relative source of the single shell-source row.
 manifest_shell_source() {
-  local dir row
-  dir="$(it_infra_dotfiles)" || return 1
-  # shellcheck source=/dev/null
-  . "${dir}/manifest-lib.sh"
-  row="$(manifest_links "${dir}/links.txt" --no-nixos | awk -F'\t' '$1=="shell-source"{print $2; exit}')"
+  local row
+  row="$(_manifest_rows_of_kind shell-source | awk -F'\t' '{print $2; exit}')"
   [[ -n $row ]] || return 1
   printf '%s' "$row"
 }
 
 # Print the rc files the shell-source row targets, one per line (".bashrc").
 manifest_shell_targets() {
-  local dir targets
-  dir="$(it_infra_dotfiles)" || return 1
-  # shellcheck source=/dev/null
-  . "${dir}/manifest-lib.sh"
-  targets="$(manifest_links "${dir}/links.txt" --no-nixos | awk -F'\t' '$1=="shell-source"{print $3; exit}')"
+  local targets
+  targets="$(_manifest_rows_of_kind shell-source | awk -F'\t' '{print $3; exit}')"
   [[ -n $targets ]] || return 1
   tr ',' '\n' <<<"$targets"
 }
 
 # Print the repo-relative source of each git-include row, one per line.
 manifest_git_includes() {
-  local dir
-  dir="$(it_infra_dotfiles)" || return 1
-  # shellcheck source=/dev/null
-  . "${dir}/manifest-lib.sh"
-  manifest_links "${dir}/links.txt" --no-nixos | awk -F'\t' '$1=="git-include"{print $2}'
+  _manifest_rows_of_kind git-include | awk -F'\t' '{print $2}'
 }
 
 ensure_shrc_sources_repo() {
@@ -551,8 +554,7 @@ maybe_configure_gnome() {
     return 0
   fi
 
-  local manifest_dir
-  manifest_dir="$(it_infra_require)" || return 0
+  local manifest_dir="$MANIFEST_DIR"
 
   local prompt="${C_GREEN}[sidorenko_dotfiles] GNOME detected. Apply workspace/keybinding/dock tweaks? [y/N] ${C_RESET}"
   if ! confirm_yes_no "$prompt" N; then
@@ -573,8 +575,7 @@ maybe_configure_gnome() {
 # Place every dotfile named in links.txt. Replaces the per-app installers this
 # file used to carry; the same script runs on NixOS from home.nix.
 apply_dotfile_links() {
-  local manifest_dir
-  manifest_dir="$(it_infra_require)" || die "cannot place dotfiles without the manifests"
+  local manifest_dir="$MANIFEST_DIR"
 
   log "Placing dotfiles from $(name "links.txt")..."
 
@@ -909,20 +910,24 @@ install_nix_packages() {
 main() {
   log "Installing sidorenko_dotfiles from DOTDIR=$(name "$DOTDIR")..."
 
-  # Fail fast and with instructions if the manifests are not reachable —
-  # everything below depends on them, so discovering it halfway through would
-  # leave the machine half-configured.
-  local manifest_dir
-  manifest_dir="$(it_infra_require)" || exit 1
+  # The manifests ship with this repo, so the only way they are missing is an
+  # incomplete checkout. Fail here rather than halfway through.
+  local manifest_dir="$MANIFEST_DIR"
+  for required in packages.txt links.txt gsettings.txt manifest-lib.sh apply-links.sh; do
+    [[ -r "${manifest_dir}/${required}" ]] ||
+      die "missing ${manifest_dir}/${required} — incomplete checkout?
+              Re-clone, or run: git -C $(name "$DOTDIR") status"
+  done
   log "Manifests: $(name "$manifest_dir")"
 
-  # On NixOS this script is the wrong tool for most of what follows: home.nix
-  # reads the same manifests declaratively, and a parallel nix-env profile plus
-  # hand-appended ~/.bashrc blocks would fight home-manager over files it owns.
+  # On NixOS this script is the wrong tool for most of what follows:
+  # ./nix/home.nix reads the same manifests declaratively, and a parallel
+  # nix-env profile plus hand-appended ~/.bashrc blocks would fight
+  # home-manager over files it owns.
   if [[ -e /etc/NIXOS ]]; then
     die "this is NixOS — the dotfiles are applied by the system configuration.
-              Rebuild instead:  ${manifest_dir%/nixos/dotfiles}/nixos-apply.sh
-              (that reads the very same manifests this script would)"
+              Rebuild the host instead; it imports ./nix/home.nix, which reads
+              the very same manifests this script would."
   fi
 
   # --- Shell and git: marker-block injections, Ubuntu/macOS only ----------

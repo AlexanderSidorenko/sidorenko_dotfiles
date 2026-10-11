@@ -1,0 +1,110 @@
+# Canonical CLI/tooling package list. ONE source of truth for both platforms.
+#
+# Consumed by:
+#   - ../nix-packages.sh  -> `nix-env -iA nixpkgs.<name>`  (Ubuntu / macOS)
+#   - ../nix/home.nix     -> home.packages                 (NixOS)
+#   - ../shrc             -> dotfiles_doctor, via the bin:/nobin tags
+#
+# Before this file existed the same list was written twice: as a NIX_PACKAGES
+# bash array here, and again as `environment.systemPackages` in the consuming
+# NixOS host's configuration.nix. They had already drifted — the NixOS side was
+# missing git-lfs, which is why `git status` in that repo died with
+# "git-lfs: command not found" while this list had carried it all along.
+#
+# FORMAT  (deliberately dependency-free: parsed by bash with `read` and by Nix
+#          with splitString, so it needs neither jq nor python at parse time)
+#
+#   <nixpkgs attribute name> [whitespace] [comma,separated,tags]   # comment
+#
+# Blank lines and #-comments are ignored. Tags:
+#
+#   linux      — Linux only; skipped on darwin
+#   gui        — needs a graphical session; skipped when headless
+#   no-nixos   — do NOT install on NixOS (the system already provides it, and a
+#                second copy in the user profile shadows it confusingly)
+#   bin:NAME   — the command this package puts on PATH, when it differs from
+#                the package name (neovim -> nvim, ripgrep -> rg). Used by
+#                shrc's dotfiles_doctor to check the tool is reachable.
+#   nobin      — provides no single checkable command (shell plugins, or a
+#                bundle like coreutils); dotfiles_doctor skips it.
+#
+# The bin:/nobin annotations exist to kill one more duplicate list: shrc's
+# dotfiles_doctor used to carry its own hand-maintained array of ~40 command
+# names, which had to track this file by hand and silently stopped covering
+# anything added here.
+#
+# EVERY NAME HERE MUST EXIST IN THE PINNED NIXPKGS. On the NixOS side this file
+# is read at evaluation time, so one typo fails the whole rebuild rather than
+# one package. ./validate.sh checks every name against the pin before you find
+# out the hard way.
+
+ast-grep
+bat
+btop
+caligula
+cargo
+cargo-deny
+cargo-shear
+clippy            bin:cargo-clippy
+cmark-gfm
+codex
+cyme
+coreutils         no-nixos,nobin # NixOS provides these; shadowing them breaks PATH expectations
+cscope
+curl
+delta
+direnv
+duf
+eternal-terminal  bin:et
+eza
+fd
+fish
+fzf
+gh                            # GitHub CLI
+git
+git-lfs                       # run `git lfs install` once per machine to wire the global filters
+gnumake           bin:make    # provides `make`
+htop
+jq
+lazygit
+lstr
+lua
+luarocks
+mc
+moor
+mosh
+ncdu
+neovim            bin:nvim
+nix               no-nixos    # NixOS owns the daemon and nix itself; a profile copy fights it
+nodejs            bin:node    # provides node, npm, npx
+pv
+qrencode
+ranger
+ripgrep           bin:rg
+shellcheck                    # AGENTS.md requires linting every shell change
+rust-analyzer
+rust-cbindgen     bin:cbindgen
+rustc
+rustfmt
+sshpass
+tig
+tldr
+tmux
+tokei
+tree
+tree-sitter
+universal-ctags   bin:ctags
+unzip
+vim
+wget
+zoxide
+zsh-autosuggestions nobin
+zsh-syntax-highlighting nobin
+zstd
+
+# --- Linux-only ------------------------------------------------------------
+sshfs             linux       # FUSE-based; nixpkgs marks it Linux-only
+
+# --- Linux GUI-only --------------------------------------------------------
+wl-clipboard      linux,gui,bin:wl-copy
+xclip             linux,gui

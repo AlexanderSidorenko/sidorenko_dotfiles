@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # Nix package install/reinstall helpers.
 #
-# THE LIST IS NOT HERE ANY MORE. It lives in
-#   it_infra/desktop/nixos/dotfiles/packages.txt
-# and is read below. It used to be a NIX_PACKAGES array in this file, which
-# meant the same ~65 package names were also written out as
-# environment.systemPackages in it_infra's desktop configuration.nix. They had
-# already drifted: this list carried git-lfs and the NixOS one did not, so
-# `git status` in it_infra failed with "git-lfs: command not found" on a
-# machine whose dotfiles claimed to install it. One file, two readers now.
+# THE LIST IS NOT HERE ANY MORE. It lives in ./manifests/packages.txt and is
+# read below. It used to be a NIX_PACKAGES array in this file, which meant the
+# same ~65 package names were also written out as environment.systemPackages
+# by the NixOS host that consumes this repo. They had already drifted: this
+# list carried git-lfs and the NixOS one did not, so `git status` in that repo
+# failed with "git-lfs: command not found" on a machine whose dotfiles claimed
+# to install it. One file, two readers now.
 #
 # Sourced by install.sh and shrc; defines NIX_PACKAGES, nix_install,
-# nix_reinstall. If it_infra is not cloned, NIX_PACKAGES comes out empty and
-# this file stays SILENT — shrc sources it on every shell start, so a warning
-# here would print on every shell. The functions complain when actually called.
+# nix_reinstall. The manifest ships with this repo, so the only way it can be
+# missing is an incomplete checkout — in which case NIX_PACKAGES comes out
+# empty and this file stays SILENT, because shrc sources it on every shell
+# start and a warning here would print on every shell. The functions complain
+# when actually called.
 
 # This file's own directory IS the repo root. Derived from BASH_SOURCE rather
 # than from $DOTDIR/$SIDORENKO_DOTFILES/$HOME, because those are unset in a
@@ -29,19 +30,8 @@ _nixpkg_self_dir() {
   fi
 }
 
-# Guarded: if the locator is missing, define no-op stubs instead of letting
-# `command not found` print on every shell start. shrc sources this file.
-if [[ -r "$(_nixpkg_self_dir)/it-infra-path.sh" ]]; then
-  # shellcheck source=./it-infra-path.sh
-  . "$(_nixpkg_self_dir)/it-infra-path.sh"
-else
-  it_infra_dir()      { return 1; }
-  it_infra_dotfiles() { return 1; }
-  it_infra_require()  {
-    echo "it-infra-path.sh is missing from $(_nixpkg_self_dir) — incomplete checkout?" >&2
-    return 1
-  }
-fi
+# The manifests ship beside this file.
+nix_manifest_dir() { printf '%s/manifests' "$(_nixpkg_self_dir)"; }
 
 # Populate NIX_PACKAGES from the manifest, applying the same tag gates the
 # NixOS side applies — minus `no-nixos`, since this path is nix-env on a
@@ -49,10 +39,11 @@ fi
 NIX_PACKAGES=()
 _nix_packages_load() {
   local manifest_dir
-  manifest_dir="$(it_infra_dotfiles)" || return 1
+  manifest_dir="$(nix_manifest_dir)"
   [[ -r "${manifest_dir}/manifest-lib.sh" ]] || return 1
+  [[ -r "${manifest_dir}/packages.txt" ]] || return 1
 
-  # shellcheck source=/dev/null
+  # shellcheck source=./manifests/manifest-lib.sh
   . "${manifest_dir}/manifest-lib.sh"
 
   # has_gui is defined by install.sh. In a plain interactive shell it is
@@ -92,9 +83,15 @@ _nix_packages_ready() {
   if (( ${#NIX_PACKAGES[@]} > 0 )); then
     return 0
   fi
+  local manifest_dir
+  manifest_dir="$(nix_manifest_dir)"
   echo "nix_install: the package list is empty." >&2
-  it_infra_require >/dev/null || return 1
-  echo "nix_install: it_infra was found but packages.txt yielded nothing — check the manifest." >&2
+  if [[ ! -r "${manifest_dir}/packages.txt" ]]; then
+    echo "nix_install: ${manifest_dir}/packages.txt is missing — incomplete checkout?" >&2
+  else
+    echo "nix_install: ${manifest_dir}/packages.txt yielded nothing — check the manifest" >&2
+    echo "             and its tag gates with: ${manifest_dir}/validate.sh" >&2
+  fi
   return 1
 }
 
@@ -129,12 +126,13 @@ nix_install() {
   fi
 
   # On NixOS this is the wrong tool: packages come from the system closure via
-  # home.nix reading the same manifest, and a parallel nix-env profile would
-  # shadow them with a second, stale copy.
+  # ./nix/home.nix reading this same manifest, and a parallel nix-env profile
+  # would shadow them with a second, stale copy.
   if [[ -e /etc/NIXOS ]]; then
     echo "nix_install: this is NixOS — packages come from the system config," >&2
-    echo "             not nix-env. Rebuild instead:" >&2
-    echo "               \$IT_INFRA/desktop/nixos-apply.sh" >&2
+    echo "             not nix-env. Rebuild the host instead; its configuration" >&2
+    echo "             imports this repo's nix/home.nix, which reads the same" >&2
+    echo "             manifests/packages.txt." >&2
     return 1
   fi
 

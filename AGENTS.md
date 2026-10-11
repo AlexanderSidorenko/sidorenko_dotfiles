@@ -6,6 +6,15 @@ Personal dotfiles for Alexander Sidorenko. Targets Linux (primary) and macOS.
 
 ```
 install.sh          — interactive installer; idempotent, safe to re-run
+manifests/          — THE SOURCE OF TRUTH: packages.txt, links.txt, gsettings.txt,
+                      plus the appliers both platforms run (apply-links.sh,
+                      apply-gsettings.sh), the shared parser (manifest-lib.sh)
+                      and validate.sh
+nix/                — the Nix-side face: home.nix (home-manager module) and
+                      manifest.nix (Nix reader for manifests/). Not needed by
+                      install.sh; a machine without Nix is unaffected
+flake.nix           — exports nix/home.nix + packages.gitpane; how a NixOS host
+                      consumes this repo as a pinned input
 shrc                — unified shell config sourced by both bash and zsh
 gitconfig           — git defaults (delta, nvim, moor pager)
 gitconfig.personal  — optional personal identity include
@@ -51,25 +60,49 @@ Used in `~/.bashrc`, `~/.zshrc`, `~/.bash_profile`, `~/.zprofile`, `~/.gitconfig
 
 **bin/ scripts** — must be executable (`chmod +x`). Use `#!/usr/bin/env bash` + `set -euo pipefail`.
 
-**Manifests live in it_infra, not here.** What to install, where each dotfile
-goes, and which GSettings keys to set are declared in the `it_infra` repo at
-`desktop/nixos/dotfiles/`:
+**`manifests/` is the source of truth.** What to install, where each dotfile
+goes, and which GSettings keys to set are declared as data, not code:
 
 | file | holds | read by |
 |---|---|---|
-| `packages.txt` | package names + `bin:`/`nobin`/platform tags | `nix-packages.sh` (Ubuntu), `home.nix` (NixOS), `shrc:dotfiles_doctor` |
-| `links.txt` | where each dotfile goes, by kind | `apply-links.sh` (both), `install.sh` (shell/git kinds) |
-| `gsettings.txt` | GNOME preference keys + values | `apply-gsettings.sh` (both) |
+| `manifests/packages.txt` | package names + `bin:`/`nobin`/platform tags | `nix-packages.sh` (Ubuntu), `nix/home.nix` (NixOS), `shrc:dotfiles_doctor` |
+| `manifests/links.txt` | where each dotfile goes, by kind | `manifests/apply-links.sh` (both), `install.sh` (shell/git kinds) |
+| `manifests/gsettings.txt` | GNOME preference keys + values | `manifests/apply-gsettings.sh` (both) |
 
-Beside them, `apply-links.sh` and `apply-gsettings.sh` are the shared appliers
-that **this** repo's `install.sh` and it_infra's NixOS `home.nix` both call, so
-placement logic exists once rather than once per platform. `validate.sh` checks
-the manifests and proves the bash and Nix readers agree.
+`apply-links.sh` and `apply-gsettings.sh` are the shared appliers that
+`install.sh` and `nix/home.nix` both call, so placement logic exists once
+rather than once per platform. `manifests/validate.sh` checks the manifests and
+proves the bash and Nix readers agree.
 
-Consequence: **this repo is not standalone.** `install.sh` requires the
-it_infra clone and fails early with instructions if it is missing — see
-`it-infra-path.sh` for the search order (`$IT_INFRA`, then `~/code/it_infra`
-and friends).
+**This repo is standalone, and that is a hard requirement.** `install.sh`
+needs nothing but this checkout. The dependency runs the other way: a NixOS
+host takes this repo as a **pinned flake input** and imports
+`nix/home.nix` —
+
+```
+it_infra  ---(pinned flake input)--->  sidorenko_dotfiles
+```
+
+— never the reverse. An earlier arrangement had the manifests living in
+it_infra with `install.sh` reaching into it, which meant a fresh Ubuntu box
+needed two clones before a single file could be placed. Do not reintroduce
+that: nothing here may require another repo.
+
+**`nix/` is the Nix-side face**, and deliberately the only thing a consumer
+needs to know about. `nix/home.nix` is a home-manager module whose options
+(`livePath`, `gui`, `manageGnomeSettings`, `sourceRev`) carry everything
+machine-specific, so no consumer learns this repo's internal layout.
+`nix/manifest.nix` is the Nix reader for the manifests. `flake.nix` exports
+both plus `packages.gitpane` and a `nix flake check` that validates the
+manifests. None of it is needed by `install.sh`; a machine with no Nix at all
+works exactly as before.
+
+**Pinned for packages, live for links.** On NixOS the package list is read at
+*evaluation* time from the pinned input (so a rebuild is reproducible and
+cannot be changed by an uncommitted edit), while the link table is read at
+*activation* time from the live working tree (so editing a dotfile takes effect
+immediately, as on Ubuntu). `nix/home.nix` warns at activation when the pinned
+rev and the working tree have diverged.
 
 **Adding a dotfile** is a row in `links.txt`, not a function here. Pick a kind:
 `link`, `link-children` (per-entry, for live state dirs like `~/.claude`),
@@ -108,12 +141,12 @@ shellcheck bin/lib/meminfo.sh    # has a `shell=bash` directive, no shebang
 
 - `shrc` is sourced by both bash and zsh — avoid bashisms or zshisms outside their respective `if` blocks.
 - Tool integrations (fzf, zoxide, etc.) are guarded with `command -v` checks; keep this consistent for new additions.
-- New tools that should be installed by default go in it_infra's
-  `desktop/nixos/dotfiles/packages.txt`. Look up exact Nix attribute names at
+- New tools that should be installed by default go in
+  `manifests/packages.txt`. Look up exact Nix attribute names at
   https://search.nixos.org/packages before adding — **a name that does not
   exist fails the whole NixOS rebuild**, not just that package, because
-  `home.nix` reads the file at evaluation time. Run
-  `desktop/nixos/dotfiles/validate.sh` after editing; it checks every name
+  `nix/home.nix` reads the file at evaluation time. Run
+  `manifests/validate.sh` after editing; it checks every name
   against the pinned nixpkgs in seconds. Platform-specific packages go in the
   Linux-only / GUI-only sections (`linux`, `gui` tags). Add `bin:NAME` when the
   command differs from the package name, or `nobin` when it provides no
