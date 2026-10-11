@@ -41,6 +41,19 @@ set -euo pipefail
 DOTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANIFEST_DIR="${DOTDIR}/manifests"
 
+# --- Run mode ---------------------------------------------------------------
+# Interactive by default, because that is how this is normally used. The
+# non-interactive modes exist so the installer can be TESTED: a VM harness
+# boots a clean Ubuntu image, runs this unattended, and then measures the
+# result with manifests/verify-applied.sh. Without them, nothing here could be
+# exercised end to end — a prompt in a VM with no tty just hangs forever.
+INTERACTIVE=1          # 0 = never read from stdin
+ASSUME=default         # default | yes  — what non-interactive prompts answer
+ON_CONFLICT=""         # passed to apply-links.sh; default depends on the mode
+DO_NIX=1               # install Nix itself if absent
+DO_PACKAGES=auto       # auto = ask (or default) | yes | no
+DO_APT=1               # apt/PPA packages and Obsidian
+
 # ---------- colors ----------
 C_RESET=$'\033[0m'
 C_GREEN=$'\033[32m'
@@ -78,6 +91,19 @@ confirm_override() {
   local target="$1"
   local reply
 
+  # Non-interactive: this one defaults to YES when interactive, so --yes keeps
+  # that and plain --non-interactive deliberately does NOT — overwriting a
+  # file in someone's $HOME without being asked is not a safe default for an
+  # unattended run.
+  if (( ! INTERACTIVE )); then
+    if [[ $ASSUME == yes ]]; then
+      log "Non-interactive: overriding $(name "$target")"
+      return 0
+    fi
+    warn "Non-interactive: keeping existing $(name "$target") (pass --yes to override)"
+    return 1
+  fi
+
   local prompt="${C_GREEN}[sidorenko_dotfiles] ${C_BLUE}${target}${C_GREEN} exists. Override? [Y/n] ${C_RESET}"
   read -r -p "$prompt" reply || true
   reply="${reply:-Y}"
@@ -93,6 +119,19 @@ confirm_yes_no() {
   local default="${2:-N}"
   local reply
 
+  if (( ! INTERACTIVE )); then
+    # --yes answers yes to everything; plain --non-interactive takes each
+    # prompt's own documented default, so an unattended run behaves like a
+    # user who pressed Enter at every question.
+    if [[ $ASSUME == yes ]]; then
+      return 0
+    fi
+    case "$default" in
+    [Yy]) return 0 ;;
+    *) return 1 ;;
+    esac
+  fi
+
   read -r -p "$prompt" reply || true
   case "$default" in
   [Yy]) reply="${reply:-Y}" ;;
@@ -103,6 +142,62 @@ confirm_yes_no() {
   [Yy] | [Yy][Ee][Ss]) return 0 ;;
   *) return 1 ;;
   esac
+}
+
+usage() {
+  cat <<'EOF'
+install.sh — install these dotfiles. Idempotent; safe to re-run.
+
+  -n, --non-interactive   never read stdin; every prompt takes its own default
+  -y, --yes               implies -n and answers YES to every prompt
+      --on-conflict MODE  what to do when a target exists and is not ours:
+                          prompt (default when interactive) | skip | replace
+      --no-nix            do not install Nix even if it is missing
+      --packages          install the Nix package set (default when --yes)
+      --no-packages       skip the Nix package set (much faster)
+      --no-apt            skip apt/PPA packages and Obsidian
+  -h, --help              this
+
+The non-interactive modes exist so this can be tested unattended in a VM; see
+manifests/verify-applied.sh for the measurement half.
+EOF
+  exit 0
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -n|--non-interactive) INTERACTIVE=0 ;;
+      -y|--yes)             INTERACTIVE=0; ASSUME=yes ;;
+      --on-conflict)        ON_CONFLICT="$2"; shift ;;
+      --no-nix)             DO_NIX=0 ;;
+      --packages)           DO_PACKAGES=yes ;;
+      --no-packages)        DO_PACKAGES=no ;;
+      --no-apt)             DO_APT=0 ;;
+      -h|--help)            usage ;;
+      *) die "unknown argument: $1 (try --help)" ;;
+    esac
+    shift
+  done
+
+  case "${ON_CONFLICT:-}" in
+    ""|prompt|skip|replace) ;;
+    *) die "--on-conflict must be prompt, skip or replace (got: ${ON_CONFLICT})" ;;
+  esac
+
+  # A prompt-based conflict policy cannot work without a tty, so pick a safe
+  # one rather than hanging on a read that never returns.
+  if [[ -z $ON_CONFLICT ]]; then
+    if (( INTERACTIVE )); then
+      ON_CONFLICT=prompt
+    elif [[ $ASSUME == yes ]]; then
+      ON_CONFLICT=replace
+    else
+      ON_CONFLICT=skip
+    fi
+  elif [[ $ON_CONFLICT == prompt ]] && (( ! INTERACTIVE )); then
+    die "--on-conflict prompt cannot be used with --non-interactive"
+  fi
 }
 
 rm_path() {
@@ -581,14 +676,14 @@ apply_dotfile_links() {
 
   # Built as an array rather than an unquoted command substitution, so the
   # flag cannot be word-split or glob-expanded.
-  local -a args=(--dotdir "$DOTDIR" --on-conflict prompt)
+  local -a args=(--dotdir "$DOTDIR" --on-conflict "$ON_CONFLICT")
   if has_gui; then args+=(--gui); else args+=(--no-gui); fi
 
   local rc=0
-  # --on-conflict prompt keeps this script's long-standing interactive
-  # behaviour: anything already in the way is asked about, not silently
-  # replaced. (home.nix passes skip instead, because an activation must never
-  # block on a prompt.)
+  # --on-conflict defaults to prompt interactively, which is this script's
+  # long-standing behaviour: anything already in the way is asked about, not
+  # silently replaced. Unattended runs get skip (or replace with --yes), and
+  # nix/home.nix passes skip because an activation must never block on input.
   bash "${manifest_dir}/apply-links.sh" "${args[@]}" || rc=$?
 
   case "$rc" in
@@ -970,20 +1065,39 @@ main() {
   # packages BEFORE restoring nvim plugins, which shells out to nvim. On a
   # fresh machine the old order skipped the restore because nvim wasn't there
   # yet.
-  maybe_install_nix
-  local prompt="${C_GREEN}[sidorenko_dotfiles] Install Nix packages? (This might take a while) [y/N] ${C_RESET}"
-  if confirm_yes_no "$prompt" N; then
-    install_nix_packages
+  if (( DO_NIX )); then
+    maybe_install_nix
   else
-    log "Skipped Nix package installation."
+    log "Skipping Nix installation (--no-nix)."
   fi
+
+  # The package set is the slow part by far — ~66 packages to fetch — so it is
+  # separately switchable. A VM run that only checks dotfile PLACEMENT can skip
+  # it and finish in a minute; a full run installs everything.
+  case "$DO_PACKAGES" in
+    yes) install_nix_packages ;;
+    no)  log "Skipped Nix package installation (--no-packages)." ;;
+    *)
+      local prompt="${C_GREEN}[sidorenko_dotfiles] Install Nix packages? (This might take a while) [y/N] ${C_RESET}"
+      if confirm_yes_no "$prompt" N; then
+        install_nix_packages
+      else
+        log "Skipped Nix package installation."
+      fi
+      ;;
+  esac
 
   install_nvim_plugins
 
-  # Non-Nix GUI apps last; they don't depend on anything above.
-  maybe_install_extra_packages
+  # Non-Nix GUI apps last; they do not depend on anything above.
+  if (( DO_APT )); then
+    maybe_install_extra_packages
+  else
+    log "Skipping apt/PPA packages and Obsidian (--no-apt)."
+  fi
 
   log "sidorenko_dotfiles successfully installed!"
 }
 
-main "$@"
+parse_args "$@"
+main

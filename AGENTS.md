@@ -15,6 +15,9 @@ nix/                — the Nix-side face: home.nix (home-manager module) and
                       install.sh; a machine without Nix is unaffected
 flake.nix           — exports nix/home.nix + packages.gitpane; how a NixOS host
                       consumes this repo as a pinned input
+tests/              — ubuntu-vm.sh: boots a CLEAN Ubuntu cloud image under
+                      QEMU/KVM, runs install.sh unattended, then measures the
+                      result with manifests/verify-applied.sh
 shrc                — unified shell config sourced by both bash and zsh
 gitconfig           — git defaults (delta, nvim, moor pager)
 gitconfig.personal  — optional personal identity include
@@ -114,6 +117,47 @@ still touches itself, `ensure_shrc_sources_repo` for RC injection. The old
 `symlink_prompt` / `copy_prompt` / `ensure_dir_prompt` helpers and the per-app
 `install_*` functions are **gone**; their work is `links.txt` rows applied by
 `apply-links.sh`.
+
+## Testing in a VM
+
+Reading `install.sh` proves nothing about whether it works; it is a thousand
+lines of idempotent-by-assertion shell. Two VM tests exercise it for real, and
+both run the **same** measurement script so the platforms cannot drift apart:
+
+```bash
+# Ubuntu: clean cloud image -> install.sh --yes -> measure
+nix shell nixpkgs#qemu nixpkgs#cloud-utils nixpkgs#openssh nixpkgs#curl nixpkgs#iproute2 \
+  --command ./tests/ubuntu-vm.sh
+./tests/ubuntu-vm.sh --packages   # also install the ~66 Nix packages (slow)
+./tests/ubuntu-vm.sh --shell      # drop into the guest afterwards to poke around
+
+# NixOS: a nixosTest living in the consuming repo, which imports nix/home.nix
+nix build <it_infra>#checks.x86_64-linux.desktop-dotfiles
+```
+
+`manifests/verify-applied.sh` is the measurement half, and is deliberately
+separate from the appliers: `apply-links.sh` reporting "12 linked" says what it
+*tried* to do, this says what is *true afterwards*. It is read-only, derives
+every expectation from the manifests (so a new `links.txt` row extends both
+tests with no edit), and emits TSV so the two platforms' results can be diffed
+rather than eyeballed. Run it on any machine to audit it:
+
+```bash
+./manifests/verify-applied.sh            # human-readable; exit 1 on any failure
+./manifests/verify-applied.sh --tsv      # status<TAB>category<TAB>item<TAB>detail
+```
+
+It checks *effects*, not markers — whether an interactive shell really ends up
+with `shrc` loaded, whether git actually resolves the included config, whether
+each gsettings key holds the declared value. That distinction earned its keep
+on the first run: two checks that looked fine by grep were wrong in reality
+(Ubuntu's `/etc/bash.bashrc` sudo hint polluted the shell probe, and
+`git config --global` silently ignores `include.path` without `--includes`).
+
+**`install.sh` must stay unattended-runnable.** `--non-interactive` / `--yes`
+exist so the VM test can drive it; a new prompt that does not route through
+`confirm_yes_no` / `confirm_override` will hang the test forever rather than
+fail it.
 
 ## Validating changes
 
