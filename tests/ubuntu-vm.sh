@@ -246,6 +246,23 @@ in_vm "cd ~/.sidorenko_dotfiles && ./manifests/verify-applied.sh ${VERIFY_FLAGS}
   > "${WORK}/verify.tsv"
 set -e
 
+# SILENCE IS NOT SUCCESS. A zero exit from the verifier only means "no FAIL
+# rows", which is equally true of a run that checked nothing — a bad flag, an
+# early death, a manifest that parsed to zero rows. So demand evidence that
+# measurements actually happened, and treat their absence as a failure of THIS
+# harness rather than a pass.
+TSV_ROWS=$(grep -cvE '^#|^$' "${WORK}/verify.tsv" || true)
+TSV_PASS=$(grep -c '^PASS' "${WORK}/verify.tsv" || true)
+log "verify.tsv: ${TSV_ROWS} rows, ${TSV_PASS} PASS"
+if (( TSV_ROWS == 0 )); then
+  warn "verify-applied.sh --tsv produced no rows; the run above proved nothing."
+  VERIFY_RC=1
+elif (( TSV_PASS < 15 )); then
+  warn "only ${TSV_PASS} checks passed; expected 15+ even on a headless image."
+  warn "Something is not being measured — treating this as a failure."
+  VERIFY_RC=1
+fi
+
 RESULTS_DIR="${CACHE_DIR}/last-ubuntu-${RELEASE}"
 mkdir -p "$RESULTS_DIR"
 cp -f "${WORK}/verify.tsv" "${WORK}/verify.log" "${WORK}/install.log" "$RESULTS_DIR/" 2>/dev/null || true

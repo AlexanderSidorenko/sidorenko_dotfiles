@@ -403,12 +403,23 @@ fi
 # Report
 # ---------------------------------------------------------------------------
 if (( TSV )); then
-  { printf '# platform=%s gui=%s nixos=%s home=%s repo=%s\n' \
+  # Written WITHOUT redirecting to /dev/stdout when no --out is given. That
+  # redirect silently produced an empty capture when stdout was a pipe rather
+  # than a tty — which is exactly how this is called from the VM harnesses, and
+  # it yielded an empty artefact while the run still reported success.
+  emit_tsv() {
+    printf '# platform=%s gui=%s nixos=%s home=%s repo=%s\n' \
       "$PLATFORM" "$GUI" "$NIXOS" "$TARGET_HOME" "$DOTDIR"
-    printf '%s\n' "${ROWS[@]}"
-  } > "${OUT:-/dev/stdout}"
-  [[ -n $OUT ]] && printf 'verify-applied: %d pass, %d fail, %d skip -> %s\n' \
-    "$PASS" "$FAIL" "$SKIPPED" "$OUT"
+    printf '# totals pass=%d fail=%d skip=%d\n' "$PASS" "$FAIL" "$SKIPPED"
+    (( ${#ROWS[@]} )) && printf '%s\n' "${ROWS[@]}"
+  }
+  if [[ -n $OUT ]]; then
+    emit_tsv >"$OUT"
+    printf 'verify-applied: %d pass, %d fail, %d skip -> %s\n' \
+      "$PASS" "$FAIL" "$SKIPPED" "$OUT"
+  else
+    emit_tsv
+  fi
 else
   printf '\n  %d pass, %d fail, %d skip\n' "$PASS" "$FAIL" "$SKIPPED"
   if (( FAIL )); then
