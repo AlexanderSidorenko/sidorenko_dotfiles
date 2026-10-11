@@ -51,7 +51,36 @@ Used in `~/.bashrc`, `~/.zshrc`, `~/.bash_profile`, `~/.zprofile`, `~/.gitconfig
 
 **bin/ scripts** — must be executable (`chmod +x`). Use `#!/usr/bin/env bash` + `set -euo pipefail`.
 
-**install.sh helpers** — use `symlink_prompt` for config dirs/files, `copy_prompt` for files that must be copied (fonts), `ensure_shrc_sources_repo` for RC injection.
+**Manifests live in it_infra, not here.** What to install, where each dotfile
+goes, and which GSettings keys to set are declared in the `it_infra` repo at
+`desktop/nixos/dotfiles/`:
+
+| file | holds | read by |
+|---|---|---|
+| `packages.txt` | package names + `bin:`/`nobin`/platform tags | `nix-packages.sh` (Ubuntu), `home.nix` (NixOS), `shrc:dotfiles_doctor` |
+| `links.txt` | where each dotfile goes, by kind | `apply-links.sh` (both), `install.sh` (shell/git kinds) |
+| `gsettings.txt` | GNOME preference keys + values | `apply-gsettings.sh` (both) |
+
+Beside them, `apply-links.sh` and `apply-gsettings.sh` are the shared appliers
+that **this** repo's `install.sh` and it_infra's NixOS `home.nix` both call, so
+placement logic exists once rather than once per platform. `validate.sh` checks
+the manifests and proves the bash and Nix readers agree.
+
+Consequence: **this repo is not standalone.** `install.sh` requires the
+it_infra clone and fails early with instructions if it is missing — see
+`it-infra-path.sh` for the search order (`$IT_INFRA`, then `~/code/it_infra`
+and friends).
+
+**Adding a dotfile** is a row in `links.txt`, not a function here. Pick a kind:
+`link`, `link-children` (per-entry, for live state dirs like `~/.claude`),
+`copy` (for files an app writes to, or that AppArmor blocks via symlink),
+`shell-source`, `git-include`, `ssh-include`, `firefox-user-js`.
+
+**install.sh helpers** — `confirm_override` / `rm_path` for the few paths it
+still touches itself, `ensure_shrc_sources_repo` for RC injection. The old
+`symlink_prompt` / `copy_prompt` / `ensure_dir_prompt` helpers and the per-app
+`install_*` functions are **gone**; their work is `links.txt` rows applied by
+`apply-links.sh`.
 
 ## Validating changes
 
@@ -79,7 +108,16 @@ shellcheck bin/lib/meminfo.sh    # has a `shell=bash` directive, no shebang
 
 - `shrc` is sourced by both bash and zsh — avoid bashisms or zshisms outside their respective `if` blocks.
 - Tool integrations (fzf, zoxide, etc.) are guarded with `command -v` checks; keep this consistent for new additions.
-- New tools that should be installed by default go in `install.sh:install_nix_packages`. Look up exact Nix attribute names at https://search.nixos.org/packages before adding. Platform-specific packages (e.g., wl-clipboard, xclip) go in the Linux-only section.
+- New tools that should be installed by default go in it_infra's
+  `desktop/nixos/dotfiles/packages.txt`. Look up exact Nix attribute names at
+  https://search.nixos.org/packages before adding — **a name that does not
+  exist fails the whole NixOS rebuild**, not just that package, because
+  `home.nix` reads the file at evaluation time. Run
+  `desktop/nixos/dotfiles/validate.sh` after editing; it checks every name
+  against the pinned nixpkgs in seconds. Platform-specific packages go in the
+  Linux-only / GUI-only sections (`linux`, `gui` tags). Add `bin:NAME` when the
+  command differs from the package name, or `nobin` when it provides no
+  command, so `dotfiles_doctor` stays accurate.
 - A tool that is **not in nixpkgs** gets a derivation at the repo root and an
   entry in `NIX_LOCAL_DERIVATIONS` (`nix-packages.sh`), as `"<file>.nix <attr>"`.
   `nix_install` builds those after the channel packages, so `nix_reinstall` —
@@ -87,7 +125,7 @@ shellcheck bin/lib/meminfo.sh    # has a `shell=bash` directive, no shebang
   is the worked example, including how to bump its pinned version.
 - Most configs are symlinked, but a config the **application itself writes to**
   must be seeded instead: copy it on a machine that has none, then never touch
-  it again (`install.sh:install_gitpane`). Symlinking one turns every in-app
+  it again (the `gitpane/config.toml` row). Symlinking one turns every in-app
   preference into a dirty tracked file, and makes machine-specific content —
   scan roots, private paths — tracked content in a public repo. Per-machine
   values belong in the live copy only, like `~/.bashrc.local` and
@@ -95,9 +133,11 @@ shellcheck bin/lib/meminfo.sh    # has a `shell=bash` directive, no shebang
 - A config consumed by a **snap** must be copied too, for a different reason:
   snapd's `home` interface grants no access to dot-directories in `$HOME`, so a
   symlink into `~/.sidorenko_dotfiles` is denied by AppArmor and the app starts
-  as if the file were absent, silently. `install.sh:install_firefox_prefs` is
-  the worked example — it also has to place its file once per Firefox profile,
-  since `user.js` is only read from inside a profile directory.
+  as if the file were absent, silently. The `firefox-user-js` kind is the
+  worked example — a `copy`, never a link, and placed once per Firefox profile,
+  since `user.js` is only read from inside a profile directory. It is its own
+  kind rather than a `copy` row because the profile directory names are random,
+  so the target cannot be written down in the manifest.
 - `~/.bashrc.local` is sourced last for machine-specific overrides not tracked in this repo.
 - Claude Code instructions are tiered: `claude/CLAUDE.md` (tracked, symlinked to
   `~/.claude/CLAUDE.md`) holds global-all-machines content and ends by importing

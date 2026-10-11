@@ -1,101 +1,101 @@
 #!/usr/bin/env bash
-# Canonical list of Nix packages plus install/reinstall helpers.
-# Sourced by install.sh and shrc; defines NIX_PACKAGES, nix_install, nix_reinstall.
+# Nix package install/reinstall helpers.
+#
+# THE LIST IS NOT HERE ANY MORE. It lives in
+#   it_infra/desktop/nixos/dotfiles/packages.txt
+# and is read below. It used to be a NIX_PACKAGES array in this file, which
+# meant the same ~65 package names were also written out as
+# environment.systemPackages in it_infra's desktop configuration.nix. They had
+# already drifted: this list carried git-lfs and the NixOS one did not, so
+# `git status` in it_infra failed with "git-lfs: command not found" on a
+# machine whose dotfiles claimed to install it. One file, two readers now.
+#
+# Sourced by install.sh and shrc; defines NIX_PACKAGES, nix_install,
+# nix_reinstall. If it_infra is not cloned, NIX_PACKAGES comes out empty and
+# this file stays SILENT — shrc sources it on every shell start, so a warning
+# here would print on every shell. The functions complain when actually called.
 
-NIX_PACKAGES=(
-  ast-grep
-  bat
-  btop
-  caligula
-  cargo
-  cargo-deny
-  cargo-shear
-  clippy
-  cmark-gfm
-  codex
-  cyme
-  coreutils
-  cscope
-  curl
-  delta
-  direnv
-  duf
-  eternal-terminal
-  eza
-  fd
-  fish
-  fzf
-  gh # GitHub CLI
-  git
-  git-lfs # run `git lfs install` once per machine to wire the global filters
-  gnumake # provides `make`
-  htop
-  jq
-  lazygit
-  lstr
-  lua
-  luarocks
-  mc
-  moor
-  mosh
-  ncdu
-  neovim
-  nix
-  nodejs # provides node, npm, npx
-  pv
-  qrencode
-  ranger
-  ripgrep
-  rust-analyzer
-  rust-cbindgen
-  rustc
-  rustfmt
-  sshpass
-  tig
-  tldr
-  tmux
-  tokei
-  tree
-  tree-sitter
-  universal-ctags
-  unzip
-  vim
-  wget
-  zoxide
-  zsh-autosuggestions
-  zsh-syntax-highlighting
-  zstd
-)
+# This file's own directory IS the repo root. Derived from BASH_SOURCE rather
+# than from $DOTDIR/$SIDORENKO_DOTFILES/$HOME, because those are unset in a
+# bare `bash -c '. nix-packages.sh'` and guessing from $HOME then points
+# somewhere that does not exist.
+_nixpkg_self_dir() {
+  local d
+  d="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || d=""
+  if [[ -n $d ]]; then
+    printf '%s' "$d"
+  else
+    printf '%s' "${DOTDIR:-${SIDORENKO_DOTFILES:-$HOME/.sidorenko_dotfiles}}"
+  fi
+}
 
-# Linux-only packages (no darwin support in nixpkgs).
-if [[ "$(uname)" == "Linux" ]]; then
-  NIX_PACKAGES+=(
-    sshfs # FUSE-based; nixpkgs marks it Linux-only
-  )
+# Guarded: if the locator is missing, define no-op stubs instead of letting
+# `command not found` print on every shell start. shrc sources this file.
+if [[ -r "$(_nixpkg_self_dir)/it-infra-path.sh" ]]; then
+  # shellcheck source=./it-infra-path.sh
+  . "$(_nixpkg_self_dir)/it-infra-path.sh"
+else
+  it_infra_dir()      { return 1; }
+  it_infra_dotfiles() { return 1; }
+  it_infra_require()  {
+    echo "it-infra-path.sh is missing from $(_nixpkg_self_dir) — incomplete checkout?" >&2
+    return 1
+  }
 fi
 
-# Linux GUI-only packages (Wayland/X11 clipboard tools).
-# has_gui is defined by install.sh; in interactive shells we just skip the gate.
-if [[ "$(uname)" == "Linux" ]] && declare -f has_gui >/dev/null 2>&1 && has_gui; then
-  NIX_PACKAGES+=(
-    wl-clipboard
-    xclip
+# Populate NIX_PACKAGES from the manifest, applying the same tag gates the
+# NixOS side applies — minus `no-nixos`, since this path is nix-env on a
+# non-NixOS box and those entries (nix itself, coreutils) are wanted here.
+NIX_PACKAGES=()
+_nix_packages_load() {
+  local manifest_dir
+  manifest_dir="$(it_infra_dotfiles)" || return 1
+  [[ -r "${manifest_dir}/manifest-lib.sh" ]] || return 1
+
+  # shellcheck source=/dev/null
+  . "${manifest_dir}/manifest-lib.sh"
+
+  # has_gui is defined by install.sh. In a plain interactive shell it is
+  # absent, and we fall back to probing the environment the same way.
+  local gui_flag="--no-gui"
+  if declare -f has_gui >/dev/null 2>&1; then
+    has_gui && gui_flag="--gui"
+  elif [[ -n ${DISPLAY-}${WAYLAND_DISPLAY-} || $(uname) == Darwin ]]; then
+    gui_flag="--gui"
+  fi
+
+  local platform
+  platform="$(uname | tr '[:upper:]' '[:lower:]')"
+
+  mapfile -t NIX_PACKAGES < <(
+    manifest_packages "${manifest_dir}/packages.txt" \
+      --platform "$platform" "$gui_flag"
   )
-fi
+}
+_nix_packages_load || true
 
 # Tools that are NOT in nixpkgs and are built from a derivation kept in this
 # repo instead. Each entry is a .nix file at the repo root that evaluates to a
 # single derivation, installed by name with `nix-env -f <file> -i <name>`.
-# Keeping them here rather than in a separate install step means nix_reinstall,
-# which wipes the profile with `nix-env -e '*'`, puts them back too.
+# Kept here rather than in packages.txt because these are local derivations
+# specific to this repo, and NixOS does not install them this way at all.
 NIX_LOCAL_DERIVATIONS=(
   "gitpane.nix gitpane"
 )
 
 # Repo root, whichever way this file was reached: install.sh exports DOTDIR,
 # the shell config exports SIDORENKO_DOTFILES, and the default covers neither.
-nix_dotdir() {
-  printf '%s' "${DOTDIR:-${SIDORENKO_DOTFILES:-$HOME/.sidorenko_dotfiles}}"
+nix_dotdir() { _nixpkg_self_dir; }
+
+# Fail with the real reason rather than "installing 0 packages".
+_nix_packages_ready() {
+  if (( ${#NIX_PACKAGES[@]} > 0 )); then
+    return 0
+  fi
+  echo "nix_install: the package list is empty." >&2
+  it_infra_require >/dev/null || return 1
+  echo "nix_install: it_infra was found but packages.txt yielded nothing — check the manifest." >&2
+  return 1
 }
 
 # Build and install every entry in NIX_LOCAL_DERIVATIONS. Slower than nix-env
@@ -128,6 +128,18 @@ nix_install() {
     return 1
   fi
 
+  # On NixOS this is the wrong tool: packages come from the system closure via
+  # home.nix reading the same manifest, and a parallel nix-env profile would
+  # shadow them with a second, stale copy.
+  if [[ -e /etc/NIXOS ]]; then
+    echo "nix_install: this is NixOS — packages come from the system config," >&2
+    echo "             not nix-env. Rebuild instead:" >&2
+    echo "               \$IT_INFRA/desktop/nixos-apply.sh" >&2
+    return 1
+  fi
+
+  _nix_packages_ready || return 1
+
   local nix_args=() pkg
   for pkg in "${NIX_PACKAGES[@]}"; do
     nix_args+=("nixpkgs.$pkg")
@@ -150,11 +162,12 @@ nix_reinstall() {
     echo "nix_reinstall: nix-env not found" >&2
     return 1
   fi
+  _nix_packages_ready || return 1
 
   echo "Querying installed packages..."
   local installed
   installed="$(nix-env -q)"
-  if [[ -n "$installed" ]]; then
+  if [[ -n $installed ]]; then
     echo "$installed"
     echo ""
     echo "Uninstalling all packages..."

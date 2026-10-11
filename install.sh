@@ -1,7 +1,42 @@
 #!/usr/bin/env bash
+# Interactive installer for these dotfiles. Idempotent; safe to re-run.
+#
+# WHAT MOVED, and why this file got ~450 lines shorter. The questions "which
+# packages", "where does each dotfile go" and "which GSettings keys" are now
+# answered by three manifests in the it_infra repo:
+#
+#   it_infra/desktop/nixos/dotfiles/packages.txt
+#   it_infra/desktop/nixos/dotfiles/links.txt
+#   it_infra/desktop/nixos/dotfiles/gsettings.txt
+#
+# with two shared appliers beside them, apply-links.sh and apply-gsettings.sh,
+# that THIS script and it_infra's NixOS home.nix both call. Before that, this
+# file had its own symlink/copy/gsettings logic and its own package array,
+# duplicating what the NixOS side declared separately — and they had already
+# drifted (the NixOS side was missing git-lfs).
+#
+# So the per-app installers that used to live here (install_tmux,
+# install_ranger, install_alacritty, install_claude, install_gitpane,
+# install_firefox_prefs, install_ssh_config, install_font_droidsans_nerd,
+# apply_gnome_tweaks, configure_key_repeat_ubuntu) are gone, replaced by rows
+# in links.txt / gsettings.txt. Adding a dotfile is now a line in a manifest,
+# not a function here.
+#
+# WHAT STAYS HERE. Everything that is genuinely Ubuntu/macOS-only or cannot be
+# expressed as data: apt and PPA packages, Obsidian, the Nix installation
+# itself, the Claude Code native installer, the GNOME extension install, the
+# nvim plugin restore, macOS `defaults write` key repeat, chsh, and the
+# marker-block injections into ~/.bashrc / ~/.zshrc / ~/.gitconfig (on NixOS
+# home-manager owns those files, so they cannot be appended to there).
+#
+# REQUIRES the it_infra clone. See ./it-infra-path.sh for the search order and
+# the trade that implies.
 set -euo pipefail
 
 DOTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=./it-infra-path.sh
+. "${DOTDIR}/it-infra-path.sh"
 
 # ---------- colors ----------
 C_RESET=$'\033[0m'
@@ -78,85 +113,44 @@ rm_path() {
   fi
 }
 
-ensure_dir_prompt() {
-  # Ensure PATH is a real directory. If something else exists, prompt to replace.
-  local dir="$1"
 
-  if [[ -d "$dir" && ! -L "$dir" ]]; then
-    return 0
-  fi
+# --- Reading links.txt for the kinds this script still applies itself -------
+#
+# shell-source and git-include are injected by the functions below rather than
+# by apply-links.sh, because on NixOS home-manager owns ~/.bashrc and
+# ~/.gitconfig. But WHICH file to source and WHICH files to include are still
+# facts that belong in the manifest, so they are read from it here instead of
+# being written down a second time.
 
-  if [[ -e "$dir" || -L "$dir" ]]; then
-    if confirm_override "$dir"; then
-      log "Removing: $(name "$dir")"
-      rm_path "$dir"
-    else
-      log "Skipped creating dir: $(name "$dir")"
-      return 1
-    fi
-  fi
-
-  mkdir -p "$dir"
-  log "Created dir: $(name "$dir")"
+# Print the repo-relative source of the single shell-source row.
+manifest_shell_source() {
+  local dir row
+  dir="$(it_infra_dotfiles)" || return 1
+  # shellcheck source=/dev/null
+  . "${dir}/manifest-lib.sh"
+  row="$(manifest_links "${dir}/links.txt" --no-nixos | awk -F'\t' '$1=="shell-source"{print $2; exit}')"
+  [[ -n $row ]] || return 1
+  printf '%s' "$row"
 }
 
-ensure_parent_dir() {
-  mkdir -p "$(dirname "$1")"
+# Print the rc files the shell-source row targets, one per line (".bashrc").
+manifest_shell_targets() {
+  local dir targets
+  dir="$(it_infra_dotfiles)" || return 1
+  # shellcheck source=/dev/null
+  . "${dir}/manifest-lib.sh"
+  targets="$(manifest_links "${dir}/links.txt" --no-nixos | awk -F'\t' '$1=="shell-source"{print $3; exit}')"
+  [[ -n $targets ]] || return 1
+  tr ',' '\n' <<<"$targets"
 }
 
-symlink_prompt() {
-  # Create/replace a symlink dest -> src (prompt before replacing).
-  local src="$1"
-  local dest="$2"
-
-  [[ -e "$src" ]] || die "Source does not exist: $(name "$src")"
-  ensure_parent_dir "$dest"
-
-  # Already correct symlink? do nothing
-  if [[ -L "$dest" ]]; then
-    local cur
-    cur="$(readlink "$dest")"
-    if [[ "$cur" == "$src" ]]; then
-      log "Symlink OK: $(name "$dest") -> $(name "$src")"
-      return 0
-    fi
-  fi
-
-  # Something exists at dest: prompt
-  if [[ -e "$dest" || -L "$dest" ]]; then
-    if confirm_override "$dest"; then
-      log "Removing: $(name "$dest")"
-      rm_path "$dest"
-    else
-      log "Skipped: $(name "$dest")"
-      return 0
-    fi
-  fi
-
-  ln -s "$src" "$dest"
-  log "Linked: $(name "$dest") -> $(name "$src")"
-}
-
-copy_prompt() {
-  # Copy src -> dest (prompt before replacing).
-  local src="$1"
-  local dest="$2"
-
-  [[ -e "$src" ]] || die "Source does not exist: $(name "$src")"
-  ensure_parent_dir "$dest"
-
-  if [[ -e "$dest" || -L "$dest" ]]; then
-    if confirm_override "$dest"; then
-      log "Removing: $(name "$dest")"
-      rm_path "$dest"
-    else
-      log "Skipped: $(name "$dest")"
-      return 0
-    fi
-  fi
-
-  cp -f "$src" "$dest"
-  log "Copied: $(name "$dest")"
+# Print the repo-relative source of each git-include row, one per line.
+manifest_git_includes() {
+  local dir
+  dir="$(it_infra_dotfiles)" || return 1
+  # shellcheck source=/dev/null
+  . "${dir}/manifest-lib.sh"
+  manifest_links "${dir}/links.txt" --no-nixos | awk -F'\t' '$1=="git-include"{print $2}'
 }
 
 ensure_shrc_sources_repo() {
@@ -282,43 +276,53 @@ EOF
 }
 
 install_gitconfig() {
-  local repo_gitconfig="${DOTDIR}/gitconfig"
   local repo_gitconfig_personal="${DOTDIR}/gitconfig.personal"
   local user_gitconfig="${HOME}/.gitconfig"
 
-  [[ -e "$repo_gitconfig" ]] || die "Missing gitconfig: $(name "$repo_gitconfig")"
-
   touch "$user_gitconfig"
 
-  if grep -qE '^[[:space:]]*path = ~/.sidorenko_dotfiles/gitconfig$' "$user_gitconfig"; then
-    log "$(name "$user_gitconfig") already includes sidorenko_dotfiles gitconfig"
-  else
-    log "Appending include block to $(name "$user_gitconfig")"
+  # Which files to include comes from links.txt's git-include rows, so adding
+  # another include is a manifest line rather than another block here. The
+  # marker suffix is derived from the file name, matching the markers the
+  # earlier hand-written version used ("" for gitconfig, ".personal" for
+  # gitconfig.personal), so machines installed before this refactor are
+  # recognised and not appended to twice.
+  local src marker suffix
+  while IFS= read -r src; do
+    [[ -n $src ]] || continue
+
+    if [[ ! -e "${DOTDIR}/${src}" ]]; then
+      # gitconfig.personal is legitimately optional.
+      log "Skipping git include (absent): $(name "$src")"
+      continue
+    fi
+
+    case "$src" in
+      gitconfig)  suffix="" ;;
+      gitconfig.*) suffix=".${src#gitconfig.}" ;;
+      *)          suffix=".${src//\//-}" ;;
+    esac
+    marker="# >>> sidorenko_dotfiles${suffix} >>>"
+
+    if grep -qE "^[[:space:]]*path = ~/\.sidorenko_dotfiles/${src//./\\.}\$" "$user_gitconfig"; then
+      log "$(name "$user_gitconfig") already includes $(name "$src")"
+      continue
+    fi
+    if grep -qF "$marker" "$user_gitconfig"; then
+      log "$(name "$user_gitconfig") already has the $(name "$src") block"
+      continue
+    fi
+
+    log "Appending include block for $(name "$src") to $(name "$user_gitconfig")"
     cat >>"$user_gitconfig" <<EOF
 
-# >>> sidorenko_dotfiles >>>
-# Auto-added by \$HOME/.sidorenko_dotfiles/install.sh
+${marker}
+# Auto-added by \$HOME/.sidorenko_dotfiles/install.sh (links.txt: git-include)
 [include]
-  path = ~/.sidorenko_dotfiles/gitconfig
-# <<< sidorenko_dotfiles <<<
+  path = ~/.sidorenko_dotfiles/${src}
+# <<< sidorenko_dotfiles${suffix} <<<
 EOF
-  fi
-
-  if [[ -e "$repo_gitconfig_personal" ]]; then
-    if grep -qE '^[[:space:]]*path = ~/.sidorenko_dotfiles/gitconfig.personal$' "$user_gitconfig"; then
-      log "$(name "$user_gitconfig") already includes sidorenko_dotfiles gitconfig.personal"
-    else
-      log "Appending personal include block to $(name "$user_gitconfig")"
-      cat >>"$user_gitconfig" <<EOF
-
-# >>> sidorenko_dotfiles.personal >>>
-# Auto-added by \$HOME/.sidorenko_dotfiles/install.sh
-[include]
-  path = ~/.sidorenko_dotfiles/gitconfig.personal
-# <<< sidorenko_dotfiles.personal <<<
-EOF
-    fi
-  fi
+  done < <(manifest_git_includes)
 
   # Always pin THIS repo to personal at the repo-local level, so it stays
   # personal even where the global identity is something else (e.g. the work
@@ -355,248 +359,38 @@ install_git_hooks() {
   local hooks_dest="${git_dir}/hooks"
   mkdir -p "$hooks_dest"
 
+  # Linked here rather than through links.txt / apply-links.sh on purpose:
+  # that manifest maps repo files into $HOME, and these go into this repo's own
+  # .git/hooks. They are not dotfiles and no other machine wants them.
   local src dest filename
   for src in "${hooks_src}"/*; do
     [[ -e "$src" ]] || continue
     filename="$(basename "$src")"
     dest="${hooks_dest}/${filename}"
-    symlink_prompt "$src" "$dest"
-  done
-}
 
-install_ranger() {
-  local ranger_src="${DOTDIR}/ranger"
-  local ranger_dest="${HOME}/.config/ranger"
-
-  # 1. Sanity check: ensure source directory exists
-  [[ -d "$ranger_src" ]] || die "Missing ranger config directory: $(name "$ranger_src")"
-
-  # 2. Ensure ~/.config/ranger is a real directory
-  ensure_dir_prompt "$ranger_dest" || return 0
-
-  # 3. Auto-enumerate and link all files/directories found in source
-  local src dest filename
-  for src in "${ranger_src}"/*; do
-    # Handle empty directory case (if glob returns literal string)
-    [[ -e "$src" ]] || continue
-
-    filename="$(basename "$src")"
-    dest="${ranger_dest}/${filename}"
-
-    symlink_prompt "$src" "$dest"
-  done
-}
-
-install_mc_keymap() {
-  local mc_dir="${HOME}/.config/mc"
-  local src="${DOTDIR}/mc.keymap"
-  local dest="${mc_dir}/mc.keymap"
-
-  [[ -e "$src" ]] || die "Missing mc keymap: $(name "$src")"
-
-  # Ensure ~/.config/mc is a real directory (not a symlink),
-  # so we don't accidentally write into a symlinked tree.
-  ensure_dir_prompt "$mc_dir" || return 0
-
-  symlink_prompt "$src" "$dest"
-}
-
-install_alacritty() {
-  # Alacritty itself is installed manually (not via Nix on Ubuntu — its OpenGL
-  # stack doesn't play nice with Nix). We only manage the config here.
-  local alacritty_src="${DOTDIR}/alacritty"
-  local alacritty_dest="${HOME}/.config/alacritty"
-
-  [[ -d "$alacritty_src" ]] || die "Missing alacritty config dir: $(name "$alacritty_src")"
-
-  ensure_dir_prompt "$alacritty_dest" || return 0
-
-  local src dest filename
-  for src in "${alacritty_src}"/*; do
-    [[ -e "$src" ]] || continue
-    filename="$(basename "$src")"
-    dest="${alacritty_dest}/${filename}"
-    symlink_prompt "$src" "$dest"
-  done
-}
-
-install_claude() {
-  # Claude Code stores a lot of local state in ~/.claude (sessions, history,
-  # credentials, projects). We only manage the tracked config files, symlinking
-  # each into the existing directory rather than replacing the whole thing.
-  local claude_src="${DOTDIR}/claude"
-  local claude_dest="${HOME}/.claude"
-
-  [[ -d "$claude_src" ]] || die "Missing claude config dir: $(name "$claude_src")"
-
-  ensure_dir_prompt "$claude_dest" || return 0
-
-  local src dest filename
-  for src in "${claude_src}"/*; do
-    [[ -e "$src" ]] || continue
-    filename="$(basename "$src")"
-    dest="${claude_dest}/${filename}"
-    symlink_prompt "$src" "$dest"
-  done
-
-  # Machine-local Claude memory: claude/CLAUDE.md ends with an import of
-  # ~/.claude/CLAUDE.machine.md, which is deliberately untracked (per-machine
-  # content only). A missing import is silently skipped, so the stub is a
-  # discoverability nicety, not a requirement.
-  local machine_md="${claude_dest}/CLAUDE.machine.md"
-  if [[ ! -e "$machine_md" ]]; then
-    cat >"$machine_md" <<'EOF'
-# Machine-local Claude Code instructions
-
-Untracked on purpose: content here applies to every project on THIS machine
-only. Imported by ~/.claude/CLAUDE.md (tracked in sidorenko_dotfiles).
-EOF
-    log "Created machine-local Claude memory stub: $(name "$machine_md")"
-  fi
-}
-
-install_gitpane() {
-  # gitpane keeps its scan roots, theme and pinned repos in one TOML file that
-  # it also WRITES to (the `t` theme picker saves back to whichever path it
-  # loaded). Symlinking the tracked copy would therefore turn an in-app
-  # preference into a dirty repo, and worse, would make the scan roots -- which
-  # are machine-specific, and can name private paths -- tracked content in a
-  # public repo.
-  #
-  # So this is a seed, not a link: copy the template on a machine that has no
-  # config yet, then never touch it again. Machine-specific roots live only in
-  # the live file, the same way ~/.bashrc.local and ~/.claude/CLAUDE.machine.md
-  # hold their per-machine content.
-  local src="${DOTDIR}/gitpane/config.toml"
-  local dest="${XDG_CONFIG_HOME:-${HOME}/.config}/gitpane/config.toml"
-
-  [[ -e "$src" ]] || die "Missing gitpane config template: $(name "$src")"
-
-  if [[ -e "$dest" ]]; then
-    log "Kept existing gitpane config: $(name "$dest")"
-    return 0
-  fi
-
-  ensure_parent_dir "$dest"
-  cp -f "$src" "$dest"
-  log "Seeded gitpane config: $(name "$dest")"
-  log "  Add this machine's scan roots there; it is never overwritten again."
-}
-
-install_firefox_prefs() {
-  # Firefox reads user.js from inside each profile, so this has to be placed
-  # once per profile rather than pointed at from one place.
-  #
-  # Copied, never symlinked. The Firefox snap runs under AppArmor with snapd's
-  # `home` interface, which deliberately grants no access to dot-directories in
-  # $HOME. A link into ~/.sidorenko_dotfiles resolves to exactly such a path,
-  # the read is denied, and Firefox starts with the prefs silently absent --
-  # the worst failure mode available, since nothing reports it.
-  #
-  # Unlike install_gitpane this is a managed file and not a seed: Firefox reads
-  # user.js and writes prefs.js, so it never edits this copy and overwriting it
-  # can't destroy in-app preferences.
-  local src="${DOTDIR}/firefox/user.js"
-  local -a profile_roots=(
-    "${HOME}/snap/firefox/common/.mozilla/firefox" # Ubuntu snap
-    "${HOME}/.mozilla/firefox"                     # deb / tarball
-    "${HOME}/Library/Application Support/Firefox/Profiles" # macOS
-  )
-  local root profile dest found=0
-
-  [[ -e "$src" ]] || die "Missing Firefox prefs: $(name "$src")"
-
-  for root in "${profile_roots[@]}"; do
-    [[ -d "$root" ]] || continue
-    for profile in "$root"/*/; do
-      # prefs.js is what makes a directory a profile Firefox has actually
-      # used; the roots also hold caches and lock files that are not profiles.
-      [[ -f "${profile}prefs.js" ]] || continue
-      found=1
-      dest="${profile}user.js"
-      if [[ -f "$dest" ]] && cmp -s "$src" "$dest"; then
-        log "Firefox prefs already current: $(name "$dest")"
+    if [[ -L "$dest" && "$(readlink "$dest")" == "$src" ]]; then
+      log "Hook OK: $(name "$filename")"
+      continue
+    fi
+    if [[ -e "$dest" || -L "$dest" ]]; then
+      if ! confirm_override "$dest"; then
+        log "Skipped hook: $(name "$filename")"
         continue
       fi
-      cp -f "$src" "$dest"
-      log "Installed Firefox prefs: $(name "$dest")"
-    done
+      rm_path "$dest"
+    fi
+    ln -s "$src" "$dest"
+    log "Linked hook: $(name "$filename")"
   done
-
-  if ((found)); then
-    log "  Restart Firefox for these to take effect."
-  else
-    log "No Firefox profiles found; skipping prefs."
-  fi
 }
 
-install_ssh_config() {
-  local src="${DOTDIR}/ssh_config"
-  local user_ssh_dir="${HOME}/.ssh"
-  local user_ssh_config="${user_ssh_dir}/config"
 
-  [[ -e "$src" ]] || die "Missing ssh_config: $(name "$src")"
 
-  mkdir -p "$user_ssh_dir"
-  chmod 700 "$user_ssh_dir"
-  touch "$user_ssh_config"
-  chmod 600 "$user_ssh_config"
 
-  local include_line="Include ~/.sidorenko_dotfiles/ssh_config"
-  local open_marker='# >>> sidorenko_dotfiles >>>'
-  local close_marker='# <<< sidorenko_dotfiles <<<'
 
-  # The included file holds `Host *` defaults. OpenSSH keeps the FIRST value
-  # it obtains for each option, so the Include must sit at the BOTTOM of the
-  # user config — any Host block below it could not override the defaults.
-  if grep -qF "$include_line" "$user_ssh_config"; then
-    if ! grep -qF "$open_marker" "$user_ssh_config"; then
-      log "$(name "$user_ssh_config") includes sidorenko_dotfiles ssh_config (hand-managed; leaving as is)"
-      return 0
-    fi
-    if awk -v mclose="$close_marker" \
-      'seen && NF {bad = 1; exit} $0 == mclose {seen = 1} END {exit bad}' \
-      "$user_ssh_config"; then
-      log "$(name "$user_ssh_config") already includes sidorenko_dotfiles ssh_config"
-      return 0
-    fi
-    log "Moving Include block to the bottom of $(name "$user_ssh_config")"
-  else
-    log "Appending Include block to $(name "$user_ssh_config")"
-  fi
 
-  # Everything except the marker block (and leading blank lines), then the
-  # block re-appended at the end. Trailing blank lines die in the "$(...)".
-  local body
-  body="$(awk -v mopen="$open_marker" -v mclose="$close_marker" '
-    $0 == mopen {inblock = 1; next}
-    $0 == mclose {inblock = 0; next}
-    inblock {next}
-    !started && !NF {next}
-    {started = 1; print}' "$user_ssh_config")"
 
-  local tmp
-  tmp="$(mktemp)"
-  {
-    if [[ -n "$body" ]]; then
-      printf '%s\n\n' "$body"
-    fi
-    printf '%s\n' "$open_marker"
-    printf '# "Host *" defaults — keep this block LAST so per-host blocks above win.\n'
-    printf '%s\n' "$include_line"
-    printf '%s\n' "$close_marker"
-  } >"$tmp"
-  mv "$tmp" "$user_ssh_config"
-  chmod 600 "$user_ssh_config"
-}
 
-install_tmux() {
-  local src="${DOTDIR}/tmux.conf"
-  local dest="${HOME}/.tmux.conf"
-
-  [[ -e "$src" ]] || die "Missing tmux config: $(name "$src")"
-  symlink_prompt "$src" "$dest"
-}
 
 maybe_switch_default_shell_to_zsh() {
   local current_shell=""
@@ -678,41 +472,14 @@ maybe_switch_default_shell_to_zsh() {
   fi
 }
 
-install_font_droidsans_nerd() {
-  local src="${DOTDIR}/DroidSansMNerdFont-Regular.otf"
-  local font_dir
-  local dest
 
-  [[ -e "$src" ]] || die "Missing font: $(name "$src")"
-
-  if [[ "$(uname)" == "Darwin" ]]; then
-    font_dir="${HOME}/Library/Fonts"
-  elif [[ "$(uname)" == "Linux" ]]; then
-    font_dir="${HOME}/.local/share/fonts"
-  else
-    warn "Unsupported Operating System for font install."
-    return 0
-  fi
-
-  ensure_dir_prompt "$font_dir" || return 0
-  dest="${font_dir}/$(basename "$src")"
-  if [[ -f "$dest" ]] && cmp -s "$src" "$dest"; then
-    log "Font already installed: $(name "$dest")"
-    return 0
-  fi
-  copy_prompt "$src" "$dest"
-
-  if [[ "$(uname)" == "Linux" ]] && command -v fc-cache &>/dev/null; then
-    log "Updating font cache..."
-    fc-cache -f "$font_dir" >/dev/null 2>&1 || true
-  fi
-}
-
-# Target Keyboard Repeat Settings (Snappy: 150ms delay, 15ms interval)
-TARGET_DELAY_MS=195
-TARGET_SPEED_MS=15
-
-# MacOS uses "ticks" (1 tick = 15ms)
+# Target keyboard repeat: 195 ms before the first repeat, 15 ms between.
+#
+# The millisecond values themselves now live in gsettings.txt (peripherals.
+# keyboard delay / repeat-interval), which is what Linux reads. Only the macOS
+# translation stays here, because macOS counts in "ticks" of 15 ms via
+# `defaults write` rather than milliseconds via GSettings — there is nothing to
+# share. Keep the two in step by hand if the target ever changes.
 MAC_TARGET_DELAY=13 # 13 * 15ms = 195ms
 MAC_TARGET_SPEED=1  # 1 * 15ms = 15ms
 
@@ -742,53 +509,30 @@ configure_key_repeat_macos() {
   fi
 }
 
-# Function to check and set Ubuntu (GNOME) key repeat values
-configure_key_repeat_ubuntu() {
-  if ! command -v gsettings &>/dev/null; then
-    warn "Skipping keyboard repeat tuning: gsettings not found."
-    return 0
-  fi
-
-  # Headless/minimal systems may have gsettings binary but no schemas/session.
-  if ! gsettings list-schemas >/dev/null 2>&1; then
-    warn "Skipping keyboard repeat tuning: gsettings schemas are unavailable."
-    return 0
-  fi
-
-  if ! gsettings list-schemas | grep -Fxq "org.gnome.desktop.peripherals.keyboard"; then
-    warn "Skipping keyboard repeat tuning: GNOME keyboard schema is unavailable."
-    return 0
-  fi
-
-  # Check Delay (Strip 'uint32' if present)
-  CURRENT_DELAY=$(gsettings get org.gnome.desktop.peripherals.keyboard delay 2>/dev/null | tr -cd '0-9')
-  if [[ "$CURRENT_DELAY" != "$TARGET_DELAY_MS" ]]; then
-    gsettings set org.gnome.desktop.peripherals.keyboard delay $TARGET_DELAY_MS
-    KEY_REPEAT_CHANGE_MADE=1
-  fi
-
-  # Check Speed (Strip 'uint32' if present)
-  CURRENT_SPEED=$(gsettings get org.gnome.desktop.peripherals.keyboard repeat-interval 2>/dev/null | tr -cd '0-9')
-  if [[ "$CURRENT_SPEED" != "$TARGET_SPEED_MS" ]]; then
-    gsettings set org.gnome.desktop.peripherals.keyboard repeat-interval $TARGET_SPEED_MS
-    KEY_REPEAT_CHANGE_MADE=1
-  fi
-}
-
+# macOS only. The Linux half used to live here as configure_key_repeat_ubuntu
+# and is now two rows in gsettings.txt (peripherals.keyboard delay /
+# repeat-interval), applied by apply-gsettings.sh like every other GNOME key.
+#
+# That move also fixed a real bug. The old check read the current value with
+#
+#     gsettings get ... delay | tr -cd '0-9'
+#
+# whose comment said "strip uint32 if present" — but tr keeps the 32 out of
+# "uint32", so `uint32 195` became `32195`, never equalled the target 195, and
+# the key was rewritten on EVERY run while reporting "Settings updated. Please
+# restart your user session." It could never report "already configured".
+# apply-gsettings.sh strips the GVariant type annotation properly.
+#
+# macOS cannot follow: it uses `defaults write -g InitialKeyRepeat` in 15 ms
+# ticks rather than GSettings in milliseconds, so there is nothing to share.
 make_keyboard_snappy() {
-  log "Configuring keyboard to be snappy..."
-
-  # Detect OS and Run
-  if [[ "$(uname)" == "Darwin" ]]; then
-    configure_key_repeat_macos
-  elif [[ "$(uname)" == "Linux" ]]; then
-    configure_key_repeat_ubuntu
-  else
-    warn "Skipping keyboard repeat tuning: unsupported operating system."
+  if [[ "$(uname)" != "Darwin" ]]; then
     return 0
   fi
 
-  # Final Output
+  log "Configuring keyboard to be snappy (macOS)..."
+  configure_key_repeat_macos
+
   if [[ "$KEY_REPEAT_CHANGE_MADE" -eq 1 ]]; then
     log "Settings updated. Please restart your user session for changes to take effect."
   else
@@ -796,120 +540,19 @@ make_keyboard_snappy() {
   fi
 }
 
-# Set a gsettings key, skipping if the schema or key isn't installed
-# (gsettings writable returns false in both cases).
-gsettings_set() {
-  local schema="$1"
-  local key="$2"
-  local value="$3"
-
-  if gsettings writable "$schema" "$key" >/dev/null 2>&1; then
-    gsettings set "$schema" "$key" "$value"
-  else
-    warn "Skipping non-writable gsettings key: $schema $key"
-  fi
-}
-
-apply_gnome_tweaks() {
-  # gsettings values: outer quotes are shell, inner quoting is the gsettings
-  # type literal (string 'RIGHT', array ['<Super>1'], booleans/ints bare).
-
-  # Fixed 4 workspaces.
-  gsettings_set org.gnome.mutter dynamic-workspaces false
-  gsettings_set org.gnome.desktop.wm.preferences num-workspaces 4
-
-  # Workspaces on all monitors.
-  gsettings_set org.gnome.mutter workspaces-only-on-primary false
-
-  # App switching only within current workspace.
-  gsettings_set org.gnome.shell.app-switcher current-workspace-only true
-
-  # Super + 1..4 switches workspaces; Alt + 1..4 moves window to workspace.
-  local i
-  for i in 1 2 3 4; do
-    gsettings_set org.gnome.desktop.wm.keybindings "switch-to-workspace-$i" "['<Super>$i']"
-    gsettings_set org.gnome.desktop.wm.keybindings "move-to-workspace-$i" "['<Alt>$i']"
-  done
-
-  # Alt + click/drag manipulates windows (move with left, resize with right).
-  gsettings_set org.gnome.desktop.wm.preferences mouse-button-modifier '<Alt>'
-
-  # Disable GNOME Shell Super + number app switching. Clear 1..9, not just
-  # 1..4, so 5..9 stay free if num-workspaces is later raised.
-  for i in 1 2 3 4 5 6 7 8 9; do
-    gsettings_set org.gnome.shell.keybindings "switch-to-application-$i" "[]"
-  done
-
-  # Disable Ubuntu Dock / Dash-to-Dock Super + number app launching.
-  gsettings_set org.gnome.shell.extensions.dash-to-dock hot-keys false
-
-  local kind
-  for kind in app-hotkey app-shift-hotkey app-ctrl-hotkey; do
-    for i in 1 2 3 4 5 6 7 8 9; do
-      gsettings_set org.gnome.shell.extensions.dash-to-dock "$kind-$i" "[]"
-    done
-  done
-
-  # Dock on the right + auto-hide.
-  gsettings_set org.gnome.shell.extensions.dash-to-dock dock-position "'RIGHT'"
-  gsettings_set org.gnome.shell.extensions.dash-to-dock dock-fixed false
-  gsettings_set org.gnome.shell.extensions.dash-to-dock autohide true
-  gsettings_set org.gnome.shell.extensions.dash-to-dock intellihide true
-
-  # Disable window/workspace animations.
-  gsettings_set org.gnome.desktop.interface enable-animations false
-
-  # --- Appearance: dark mode + battery percentage ---
-  gsettings_set org.gnome.desktop.interface color-scheme "'prefer-dark'"
-  gsettings_set org.gnome.desktop.interface show-battery-percentage true
-
-  # --- Power: never blank or auto-suspend (developer workstation) ---
-  gsettings_set org.gnome.desktop.session idle-delay 0
-  gsettings_set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type "'nothing'"
-  gsettings_set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-timeout 3600
-  gsettings_set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-timeout 7200
-  gsettings_set org.gnome.settings-daemon.plugins.power ambient-enabled false
-
-  # --- Notifications: no popup banners, hidden on lock screen ---
-  gsettings_set org.gnome.desktop.notifications show-banners false
-  gsettings_set org.gnome.desktop.notifications show-in-lock-screen false
-
-  # --- Touchpad: traditional (non-natural) scroll, two-finger right-click ---
-  gsettings_set org.gnome.desktop.peripherals.touchpad natural-scroll false
-  gsettings_set org.gnome.desktop.peripherals.touchpad click-method "'fingers'"
-
-  # --- Display: enable fractional scaling (HiDPI) ---
-  gsettings_set org.gnome.mutter experimental-features "['scale-monitor-framebuffer']"
-
-  # --- Dock: per-workspace app indicators ---
-  gsettings_set org.gnome.shell.extensions.dash-to-dock isolate-workspaces true
-
-  # --- Tiling Assistant: orange active-window hint (no-op if extension absent) ---
-  gsettings_set org.gnome.shell.extensions.tiling-assistant active-window-hint-color "'rgb(211,70,21)'"
-
-  # --- Nautilus / file chooser: list view, show hidden files ---
-  gsettings_set org.gnome.nautilus.preferences default-folder-viewer "'list-view'"
-  gsettings_set org.gtk.gtk4.Settings.FileChooser show-hidden true
-
-  # --- Keyboard: NumLock off at login ---
-  gsettings_set org.gnome.desktop.peripherals.keyboard numlock-state false
-}
-
+# The ~75 workspace / keybinding / dock / appearance keys are rows in
+# gsettings.txt, applied by the shared apply-gsettings.sh. The schema and
+# session checks that used to be duplicated here live in that script, which
+# also skips keys whose schema is absent (dash-to-dock on stock GNOME) rather
+# than failing.
 maybe_configure_gnome() {
   if ! is_gnome; then
     log "Skipping GNOME tweaks (not a GNOME session)."
     return 0
   fi
 
-  if ! command -v gsettings &>/dev/null; then
-    warn "Skipping GNOME tweaks: gsettings not found."
-    return 0
-  fi
-
-  if ! gsettings list-schemas >/dev/null 2>&1; then
-    warn "Skipping GNOME tweaks: gsettings schemas are unavailable."
-    return 0
-  fi
+  local manifest_dir
+  manifest_dir="$(it_infra_require)" || return 0
 
   local prompt="${C_GREEN}[sidorenko_dotfiles] GNOME detected. Apply workspace/keybinding/dock tweaks? [y/N] ${C_RESET}"
   if ! confirm_yes_no "$prompt" N; then
@@ -917,9 +560,48 @@ maybe_configure_gnome() {
     return 0
   fi
 
-  log "Applying GNOME tweaks..."
-  apply_gnome_tweaks
-  log "GNOME tweaks applied. Log out and back in for all changes to take effect."
+  log "Applying GNOME preferences from $(name "gsettings.txt")..."
+  # --no-nixos: this path is only ever taken on Ubuntu/macOS, and the no-nixos
+  # rows exist precisely because NixOS modules own those keys there.
+  if bash "${manifest_dir}/apply-gsettings.sh" --no-nixos; then
+    log "GNOME tweaks applied. Log out and back in for all changes to take effect."
+  else
+    warn "Some GNOME preferences failed to apply (see above)."
+  fi
+}
+
+# Place every dotfile named in links.txt. Replaces the per-app installers this
+# file used to carry; the same script runs on NixOS from home.nix.
+apply_dotfile_links() {
+  local manifest_dir
+  manifest_dir="$(it_infra_require)" || die "cannot place dotfiles without the manifests"
+
+  log "Placing dotfiles from $(name "links.txt")..."
+
+  # Built as an array rather than an unquoted command substitution, so the
+  # flag cannot be word-split or glob-expanded.
+  local -a args=(--dotdir "$DOTDIR" --on-conflict prompt)
+  if has_gui; then args+=(--gui); else args+=(--no-gui); fi
+
+  local rc=0
+  # --on-conflict prompt keeps this script's long-standing interactive
+  # behaviour: anything already in the way is asked about, not silently
+  # replaced. (home.nix passes skip instead, because an activation must never
+  # block on a prompt.)
+  bash "${manifest_dir}/apply-links.sh" "${args[@]}" || rc=$?
+
+  case "$rc" in
+    0) ;;
+    3) warn "Some dotfiles were skipped (listed above)." ;;
+    *) die "apply-links.sh failed (exit ${rc})." ;;
+  esac
+
+  # Fonts are a `copy` row rather than a symlink, so the font cache has to be
+  # told. NixOS does not need this: home.nix installs the packaged font and
+  # fontconfig picks it up from the profile.
+  if has_gui && [[ "$(uname)" == "Linux" ]] && command -v fc-cache >/dev/null 2>&1; then
+    fc-cache -f >/dev/null 2>&1 && log "Font cache refreshed."
+  fi
 }
 
 # --- GNOME Shell extension: Astra Monitor (memory history plot in the top bar) ---
@@ -1226,43 +908,58 @@ install_nix_packages() {
 
 main() {
   log "Installing sidorenko_dotfiles from DOTDIR=$(name "$DOTDIR")..."
-  ensure_shrc_sources_repo bashrc shrc
+
+  # Fail fast and with instructions if the manifests are not reachable —
+  # everything below depends on them, so discovering it halfway through would
+  # leave the machine half-configured.
+  local manifest_dir
+  manifest_dir="$(it_infra_require)" || exit 1
+  log "Manifests: $(name "$manifest_dir")"
+
+  # On NixOS this script is the wrong tool for most of what follows: home.nix
+  # reads the same manifests declaratively, and a parallel nix-env profile plus
+  # hand-appended ~/.bashrc blocks would fight home-manager over files it owns.
+  if [[ -e /etc/NIXOS ]]; then
+    die "this is NixOS — the dotfiles are applied by the system configuration.
+              Rebuild instead:  ${manifest_dir%/nixos/dotfiles}/nixos-apply.sh
+              (that reads the very same manifests this script would)"
+  fi
+
+  # --- Shell and git: marker-block injections, Ubuntu/macOS only ----------
+  # These append to files home-manager owns on NixOS, which is why they are
+  # not in apply-links.sh. The file names still come from links.txt.
+  local shell_src rc
+  shell_src="$(manifest_shell_source)" ||
+    die "links.txt has no shell-source row; cannot wire up the shell config"
+  # Targets come from the manifest too (".bashrc,.zshrc"), so adding a shell
+  # there needs no change here.
+  while IFS= read -r rc; do
+    [[ -n $rc ]] || continue
+    ensure_shrc_sources_repo "${rc#.}" "$shell_src"
+  done < <(manifest_shell_targets)
+
   ensure_bash_profile_sources_bashrc
-  ensure_shrc_sources_repo zshrc shrc
   ensure_zprofile_sources_zshrc
   maybe_switch_default_shell_to_zsh
   install_gitconfig
   install_git_hooks
-  if has_gui; then
-    install_font_droidsans_nerd
-  else
-    log "Skipping font install (headless)"
-  fi
-  install_ranger
-  install_mc_keymap
-  install_gitpane
-  if has_gui; then
-    install_firefox_prefs
-  else
-    log "Skipping Firefox prefs (headless)"
-  fi
-  install_alacritty
-  install_tmux
-  install_claude
+
+  # --- Everything named in links.txt --------------------------------------
+  # One call replaces install_tmux / install_ranger / install_alacritty /
+  # install_claude / install_gitpane / install_firefox_prefs /
+  # install_ssh_config / install_font_droidsans_nerd / the nvim symlink.
+  apply_dotfile_links
+
   maybe_install_claude_bin
-  install_ssh_config
-  if has_gui; then
-    make_keyboard_snappy
-  else
-    log "Skipping keyboard repeat tuning (headless)"
-  fi
+
+  make_keyboard_snappy   # macOS only; Linux key repeat is in gsettings.txt
+
   if has_gui; then
     maybe_configure_gnome
     maybe_install_memory_monitor
   else
     log "Skipping GNOME tweaks (headless)"
   fi
-  symlink_prompt "${DOTDIR}/nvim" "${HOME}/.config/nvim"
 
   # Nix supplies the nvim binary (and most other CLI tools), so install Nix
   # packages BEFORE restoring nvim plugins, which shells out to nvim. On a

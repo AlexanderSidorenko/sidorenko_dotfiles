@@ -359,15 +359,34 @@ unset __nix_packages_file
 # dotfiles_doctor: on-demand check that required CLI tools are present.
 # Runs only when invoked (not on every shell startup, which is slow on cold/SSH boxes).
 dotfiles_doctor() {
-  local tools=(
-    ast-grep bat cmark-gfm cscope ctags curl delta direnv duf et eza fd
-    fish fzf git jq lazygit less lua luarocks mc moor mosh ncdu nvim pv
-    qrencode ranger rg sshpass tig tldr tmux tokei tree tree-sitter wget
-    zoxide zstd
-  )
-  if [[ "$(uname)" == "Linux" ]] && has_gui; then
-    tools+=(wl-copy xclip)
+  # The tool list is DERIVED from packages.txt rather than written out here.
+  # It used to be a hand-maintained array of ~40 command names that had to
+  # track the package list by hand, and silently stopped covering anything
+  # added to it. The bin:/nobin tags in packages.txt carry the package ->
+  # command mapping (neovim -> nvim, ripgrep -> rg, plugins -> skipped).
+  local tools=()
+  local __d
+  if __d="$(it_infra_dotfiles 2>/dev/null)" && [[ -r "${__d}/manifest-lib.sh" ]]; then
+    . "${__d}/manifest-lib.sh"
+    local __gui=--no-gui
+    has_gui && __gui=--gui
+    mapfile -t tools < <(
+      manifest_binaries "${__d}/packages.txt" \
+        --platform "$(uname | tr '[:upper:]' '[:lower:]')" "$__gui" \
+        $([[ -e /etc/NIXOS ]] && printf '%s' --nixos || printf '%s' --no-nixos)
+    )
   fi
+
+  if (( ${#tools[@]} == 0 )); then
+    printf 'dotfiles_doctor: cannot read the package manifest.\n' >&2
+    it_infra_require >/dev/null
+    return 1
+  fi
+
+  # `less` is checked too: shrc configures LESS_TERMCAP_* and uses it as a
+  # fallback pager, but it is a base-system tool rather than one we install,
+  # so it has no packages.txt row to derive from.
+  tools+=(less)
 
   local missing=() present=() t
   for t in "${tools[@]}"; do
