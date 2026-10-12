@@ -1,7 +1,14 @@
 {
-  "skipDangerousModePermissionPrompt": true,
-  "effortLevel": "xhigh",
   "env": {
     "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1"
+  },
+  "effortLevel": "xhigh",
+  "skipDangerousModePermissionPrompt": true,
+  "agentPushNotifEnabled": true,
+  "theme": "dark",
+  "modelSettings": {
+    "claude-opus-5-5": {
+      "effortLevel": "xhigh"
+    }
   }
 }
