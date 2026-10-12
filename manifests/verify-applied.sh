@@ -326,6 +326,31 @@ if ! skipped_cat shell; then
         emit FAIL shell "${sh}-clean-status" "rc leaves \$?=${st}; the first prompt will show a phantom error"
       fi
     done
+
+    # PLUGINS MUST BE RESIDENT, not merely installed. zsh-autosuggestions and
+    # zsh-syntax-highlighting are tagged `nobin` in packages.txt because they
+    # add no command to PATH — so the package check above cannot see them, and
+    # a plugin that silently fails to load leaves a shell that starts perfectly
+    # well. Both were installed and loaded by nobody until this check existed:
+    # shrc looked only in ~/.nix-profile/share, which home-manager's
+    # useUserPackages does not populate.
+    if command -v zsh >/dev/null 2>&1; then
+      probe="$(zsh -ic 'print -r -- "SUG:$(functions _zsh_autosuggest_start >/dev/null 2>&1 && echo y || echo n):HL:${ZSH_HIGHLIGHT_VERSION:-none}:"' 2>/dev/null |
+               grep -o 'SUG:[yn]:HL:[^:]*:' | tail -1)"
+      if [[ -z $probe ]]; then
+        emit SKIP shell "zsh-plugins" "could not probe an interactive zsh"
+      else
+        [[ $probe == SUG:y:* ]] \
+          && emit PASS shell "zsh-autosuggestions" "resident in an interactive zsh" \
+          || emit FAIL shell "zsh-autosuggestions" "installed but NOT loaded (check the share/ paths in shrc)"
+        hl="${probe##*HL:}"; hl="${hl%:}"
+        [[ $hl != none ]] \
+          && emit PASS shell "zsh-syntax-highlighting" "resident (version ${hl})" \
+          || emit FAIL shell "zsh-syntax-highlighting" "installed but NOT loaded (check the share/ paths in shrc)"
+      fi
+    else
+      emit SKIP shell "zsh-plugins" "zsh not installed"
+    fi
   fi
 fi
 

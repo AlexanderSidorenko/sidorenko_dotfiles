@@ -146,10 +146,22 @@ in
     # apply-links.sh does NOT handle the shell-source row: those files are
     # read-only symlinks into the store and cannot be appended to.
     #
-    # shrc does its own zsh-plugin loading from ~/.nix-profile/share/..., and
-    # home.packages populates ~/.nix-profile just as nix-env does on Ubuntu, so
-    # that keeps working untouched. The home-manager plugin options are
-    # therefore left OFF — enabling them would load each plugin twice.
+    # shrc does its own zsh-plugin loading, so the home-manager plugin options
+    # are left OFF — enabling them would load each plugin twice.
+    #
+    # This comment used to add "home.packages populates ~/.nix-profile just as
+    # nix-env does on Ubuntu, so that keeps working untouched". That was FALSE,
+    # and it cost both plugins. `useUserPackages = true` installs into
+    # /etc/profiles/per-user/$USER and does NOT populate ~/.nix-profile, which
+    # on this host still points at the empty nix-env profile. shrc looked only
+    # under ~/.nix-profile/share, found nothing, and zsh-autosuggestions and
+    # zsh-syntax-highlighting were installed and loaded by nobody.
+    #
+    # Nothing caught it: both are tagged `nobin` in packages.txt precisely
+    # because they put no command on PATH, so the package check skips them, and
+    # a plugin that fails to load is invisible to a shell that still starts.
+    # shrc now searches every layout we use, and verify-applied.sh asserts the
+    # plugins are actually resident rather than merely installed.
     programs.bash = {
       enable = true;
       initExtra = shellInit;

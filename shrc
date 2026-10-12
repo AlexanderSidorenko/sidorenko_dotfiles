@@ -220,14 +220,43 @@ if [ -n "$ZSH_VERSION" ]; then
         source <(fzf --zsh)
     fi
 
-    # zsh-autosuggestions: fish-style ghost text from history.
-    [[ -f "$HOME/.nix-profile/share/zsh-autosuggestions/zsh-autosuggestions.zsh" ]] \
-        && source "$HOME/.nix-profile/share/zsh-autosuggestions/zsh-autosuggestions.zsh"
+    # zsh plugins. The share/ directory depends on HOW the package was
+    # installed, so try every layout we actually use rather than one:
+    #
+    #   ~/.nix-profile/share               nix-env — install.sh on Ubuntu/macOS
+    #   /etc/profiles/per-user/$USER/share home-manager with useUserPackages
+    #   /run/current-system/sw/share       NixOS environment.systemPackages
+    #   /usr/share/...                     Debian/Ubuntu apt packages
+    #
+    # Only the first was checked before, which made both plugins SILENTLY
+    # inert on NixOS: home-manager with useUserPackages installs into
+    # /etc/profiles/per-user/$USER and leaves ~/.nix-profile pointing at the
+    # (empty) nix-env profile. They were installed and loaded by nobody, and
+    # nothing said so — there is no command to miss from PATH, so even the
+    # package check could not see it.
+    __zsh_load_plugin() {
+        local name="$1" f
+        for f in \
+            "$HOME/.nix-profile/share/$name/$name.zsh" \
+            "/etc/profiles/per-user/${USER}/share/$name/$name.zsh" \
+            "/run/current-system/sw/share/$name/$name.zsh" \
+            "/usr/share/$name/$name.zsh" \
+            "/usr/share/zsh/plugins/$name/$name.zsh"
+        do
+            if [[ -r "$f" ]]; then
+                source "$f"
+                return 0
+            fi
+        done
+        return 1
+    }
 
-    # zsh-syntax-highlighting: must be sourced LAST — it hooks ZLE and won't
-    # colourise widgets defined after it.
-    [[ -f "$HOME/.nix-profile/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]] \
-        && source "$HOME/.nix-profile/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
+    # fish-style ghost text from history.
+    __zsh_load_plugin zsh-autosuggestions
+
+    # Must be sourced LAST — it hooks ZLE and will not colourise widgets
+    # defined after it.
+    __zsh_load_plugin zsh-syntax-highlighting
 
 elif [ -n "$BASH_VERSION" ]; then
     # -------------------------------------------------------------------------
