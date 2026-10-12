@@ -55,14 +55,28 @@ link            mc.keymap               .config/mc/mc.keymap
 link            gitpane/config.toml     .config/gitpane/config.toml
 
 # --- Claude ----------------------------------------------------------------
-# link-children, NEVER link. ~/.claude is a LIVE STATE DIRECTORY: it holds
-# projects/, sessions/, shell-snapshots/, history.jsonl and .credentials.json
-# alongside the three tracked files. Replacing it with one directory symlink
-# would put all of that inside the dotfiles repo — and an earlier accident in
-# the other direction (an rsync that dumped it_infra into ~) is exactly how
-# much fun that class of mistake is to clean up. Only CLAUDE.md, settings.json
-# and skills/ are ours; everything else in there belongs to the harness.
-link-children   claude                  .claude
+# NEVER a plain `link` for a directory here. ~/.claude is a LIVE STATE
+# DIRECTORY: it holds projects/, sessions/, shell-snapshots/, history.jsonl and
+# .credentials.json alongside the tracked files. Replacing it with one
+# directory symlink would put all of that inside this repo — and an earlier
+# accident in the other direction (an rsync that dumped it_infra into ~) is
+# exactly how much fun that class of mistake is to clean up.
+#
+# THE SAME IS TRUE ONE LEVEL DOWN, which cost 4.6 MB before it was noticed.
+# This used to be a single `link-children claude .claude` row, which linked
+# every child of claude/ — including skills/ — so ~/.claude/skills became a
+# directory symlink INTO this repo. Claude Code then synced its own skill
+# cache to ~/.claude/skills/synced/<uuid>/…, i.e. straight into the checkout,
+# where it sat untracked, unignored, and one `git add -A` away from being
+# committed to a public repo.
+#
+# So the rows are explicit now. Each names exactly one thing, and both ~/.claude
+# AND ~/.claude/skills stay real directories the harness can write into without
+# touching this repo. Adding a tracked file under claude/ needs a row here;
+# that is the intended cost of not globbing a directory the harness shares.
+link            claude/CLAUDE.md        .claude/CLAUDE.md
+link            claude/settings.json    .claude/settings.json
+link-children   claude/skills           .claude/skills
 
 # --- Firefox ---------------------------------------------------------------
 firefox-user-js firefox/user.js         -                       gui

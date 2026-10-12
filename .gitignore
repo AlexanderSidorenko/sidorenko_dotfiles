@@ -1,1 +1,15 @@
+# LazyVim writes this; it records which starter modules are enabled on THIS
+# machine, not a tracked preference.
 nvim/lazyvim.json
+
+# Claude Code's per-project LOCAL settings tier. Written by the harness
+# whenever a permission is granted while working in this checkout, and
+# machine-specific by design (its sibling, claude/settings.json, is the shared
+# tier and IS tracked).
+#
+# Note the asymmetry with manifests/links.txt, which refuses to gitignore
+# anything under claude/skills/: that path is OURS, so stray state appearing
+# there means a link row regressed and must stay loud. This path belongs to the
+# harness and is expected to exist on every machine, so ignoring it hides
+# nothing.
+.claude/settings.local.json

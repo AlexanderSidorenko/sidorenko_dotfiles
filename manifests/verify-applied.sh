@@ -209,6 +209,48 @@ if ! skipped_cat links; then
   done < <(manifest_links "${HERE}/links.txt" "${GATES[@]}")
 fi
 
+# NO ANCESTOR OF A LINK TARGET MAY BE A SYMLINK.
+#
+# If a directory ABOVE a target is itself a symlink, everything the owning
+# application writes beside our file lands wherever that symlink points —
+# typically this repo. The file we placed looks perfect; the damage is its
+# neighbours. e.g. if ~/.config were ever a symlink, every .config/* row would
+# still verify while the whole directory leaked.
+#
+# SCOPE, stated honestly: this walks the parents of the targets NAMED in
+# links.txt. It does NOT cover a `link-children` target being a symlink
+# itself — that row expands to children at runtime, so its own directory is
+# never any row's parent. The link-children branch above already asserts
+# exactly that ("is a directory SYMLINK; must be a real dir"), which is what
+# actually caught ~/.claude/skills leaking 4.6 MB of Claude Code's skill cache
+# into the checkout. The two checks are complementary, not redundant.
+#
+# Deliberately NOT solved with a .gitignore: hiding stray state would make a
+# regression silent, which is the opposite of what is wanted.
+if ! skipped_cat links; then
+  ancestors_ok=1
+  while IFS=$'\t' read -r kind _src dest _tags; do
+    [[ $dest == - || -z ${dest:-} ]] && continue
+    case "$kind" in link|link-children|copy) ;; *) continue ;; esac
+    parent="$(dirname -- "${TARGET_HOME}/${dest}")"
+    bad=""
+    # Walk up to $HOME, flagging any symlinked ancestor.
+    while [[ $parent == "$TARGET_HOME"/* ]]; do
+      if [[ -L $parent ]]; then
+        bad="$parent -> $(readlink -- "$parent")"
+        break
+      fi
+      parent="$(dirname -- "$parent")"
+    done
+    if [[ -n $bad ]]; then
+      emit FAIL links "parent-of:${dest}" "ancestor is a symlink: ${bad}"
+      ancestors_ok=0
+    fi
+  done < <(manifest_links "${HERE}/links.txt" "${GATES[@]}")
+  (( ancestors_ok )) &&
+    emit PASS links "parent-chains" "every target's parent chain is real directories"
+fi
+
 # ---------------------------------------------------------------------------
 # packages — is each expected COMMAND actually runnable?
 # ---------------------------------------------------------------------------
