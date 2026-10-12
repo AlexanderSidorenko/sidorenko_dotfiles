@@ -306,6 +306,26 @@ if ! skipped_cat shell; then
     else
       emit FAIL shell "bin-on-path" "repo bin/ not on PATH in an interactive shell"
     fi
+
+    # THE RC FILE MUST LEAVE A CLEAN $?. The zsh prompt renders `%(?::✘%?)`, so
+    # a non-zero status surviving rc processing paints a red ✘ on the FIRST
+    # prompt of every new shell — reporting an error that never happened, in
+    # every tmux pane and every ssh login. That is exactly what a trailing
+    # `[[ -r ~/.bashrc.local ]] && source …` did on every machine without that
+    # optional file.
+    for sh in bash zsh; do
+      command -v "$sh" >/dev/null 2>&1 || continue
+      st="$("$sh" -ic 'printf "RC_STATUS:%s:" "$?"' 2>/dev/null |
+            grep -o 'RC_STATUS:[0-9]*:' | tail -1)"
+      st="${st#RC_STATUS:}"; st="${st%:}"
+      if [[ $st == 0 ]]; then
+        emit PASS shell "${sh}-clean-status" "rc processing leaves \$?=0"
+      elif [[ -z $st ]]; then
+        emit SKIP shell "${sh}-clean-status" "could not read the post-rc status"
+      else
+        emit FAIL shell "${sh}-clean-status" "rc leaves \$?=${st}; the first prompt will show a phantom error"
+      fi
+    done
   fi
 fi
 

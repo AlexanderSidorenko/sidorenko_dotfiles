@@ -693,4 +693,19 @@ if command -v git >/dev/null 2>&1; then
   alias gclean='git clean -xfd'
 fi
 
-[[ -r "$HOME/.bashrc.local" ]] && source "$HOME/.bashrc.local"
+# Machine-local overrides, optional.
+#
+# Written as if/fi rather than `[[ -r … ]] && source …` because this is the
+# LAST statement in this file, and a failed `[[ ]]` test leaves $? = 1. The
+# zsh prompt renders `%(?::✘%?)`, so on every machine WITHOUT a
+# ~/.bashrc.local — i.e. most of them — the first prompt of every new shell,
+# in tmux and over ssh alike, opened with a red ✘1 reporting an error that had
+# not happened.
+if [[ -r "$HOME/.bashrc.local" ]]; then
+    source "$HOME/.bashrc.local"
+fi
+
+# Leave a clean status for the first prompt no matter what ran above. Cheap
+# insurance: any future `[[ … ]] && …` added at the end of this file would
+# otherwise reintroduce the phantom error.
+true
