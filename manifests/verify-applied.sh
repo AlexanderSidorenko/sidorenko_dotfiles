@@ -247,8 +247,9 @@ if ! skipped_cat links; then
       ancestors_ok=0
     fi
   done < <(manifest_links "${HERE}/links.txt" "${GATES[@]}")
-  (( ancestors_ok )) &&
+  if (( ancestors_ok )); then
     emit PASS links "parent-chains" "every target's parent chain is real directories"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -382,13 +383,22 @@ if ! skipped_cat shell; then
       if [[ -z $probe ]]; then
         emit SKIP shell "zsh-plugins" "could not probe an interactive zsh"
       else
-        [[ $probe == SUG:y:* ]] \
-          && emit PASS shell "zsh-autosuggestions" "resident in an interactive zsh" \
-          || emit FAIL shell "zsh-autosuggestions" "installed but NOT loaded (check the share/ paths in shrc)"
+        # if/else, not `A && B || C`: in that form C runs when B fails too, so
+        # a future `emit` that returned non-zero would record BOTH a pass and a
+        # fail for the same check. shellcheck flags it as SC2015 and is right
+        # to — the shape is wrong even where today's exit statuses make it
+        # harmless.
+        if [[ $probe == SUG:y:* ]]; then
+          emit PASS shell "zsh-autosuggestions" "resident in an interactive zsh"
+        else
+          emit FAIL shell "zsh-autosuggestions" "installed but NOT loaded (check the share/ paths in shrc)"
+        fi
         hl="${probe##*HL:}"; hl="${hl%:}"
-        [[ $hl != none ]] \
-          && emit PASS shell "zsh-syntax-highlighting" "resident (version ${hl})" \
-          || emit FAIL shell "zsh-syntax-highlighting" "installed but NOT loaded (check the share/ paths in shrc)"
+        if [[ $hl != none ]]; then
+          emit PASS shell "zsh-syntax-highlighting" "resident (version ${hl})"
+        else
+          emit FAIL shell "zsh-syntax-highlighting" "installed but NOT loaded (check the share/ paths in shrc)"
+        fi
       fi
     else
       emit SKIP shell "zsh-plugins" "zsh not installed"
