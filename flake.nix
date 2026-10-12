@@ -33,19 +33,38 @@
   #   checks.manifests      `nix flake check` validates the manifests.
 
   inputs = {
-    # Pinned to an exact rev rather than a moving branch, matching the policy
-    # the consuming repo sets for all of its inputs. This pin only affects the
-    # dev shell and the checks below — a CONSUMER's module evaluation uses the
-    # consumer's own nixpkgs, which is what keeps one nixpkgs in their closure
-    # instead of two glibcs.
+    # Pinned to an exact rev rather than a moving branch. A CONSUMER's module
+    # evaluation uses the consumer's own nixpkgs (their `follows` overrides
+    # this), which is what keeps one nixpkgs in their closure instead of two
+    # glibcs — so for them this pin only backs the checks and dev shell.
+    #
+    # It is NOT only that for us: ./nix-packages.sh reads this rev back out of
+    # this file and installs the Ubuntu package set from it, so that both
+    # platforms get identical versions of manifests/packages.txt. That is why
+    # the literal URL matters and why there is no second copy of the rev
+    # anywhere — a flake's `inputs` block cannot interpolate, so this is
+    # necessarily the only place it can live.
     nixpkgs.url = "github:NixOS/nixpkgs/f4f698677b11021a8f84f452e23ae9ef2427bec3";
+
+    # Only for ./nix/tests/nixos-vm.nix, so this repo can test its own NixOS
+    # module without a consumer. release-26.05 to match the nixpkgs above;
+    # home-manager's modules track a nixpkgs release and mixing branches across
+    # that boundary is the usual way this breaks.
+    home-manager = {
+      url = "github:nix-community/home-manager/db7d5e2332710f5abb088f6b5de927d7f9511b35";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, ... }:
+  outputs = { self, nixpkgs, home-manager, ... }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ];
       forAllSystems = f:
         nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      # nixosTest only works on Linux, and only x86_64 here.
+      linuxSystems = [ "x86_64-linux" ];
+      forLinux = f:
+        nixpkgs.lib.genAttrs linuxSystems (system: f nixpkgs.legacyPackages.${system});
     in
     {
       # The home-manager module. Consumers import this and set, at most, the
@@ -105,6 +124,30 @@
           }" >>$out
           echo "OK: all names resolved" >>$out
         '';
+      }
+      # The VM test and the interface contract are Linux-only (nixosTest needs
+      # KVM), so they are merged in for those systems rather than claimed for
+      # darwin, where `nix flake check` would fail on them.
+      // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.isLinux
+                                    && pkgs.stdenv.hostPlatform.isx86_64) {
+        # Boots a VM carrying ./nix/home.nix and runs manifests/verify-applied.sh
+        # inside it — the same script tests/ubuntu-vm.sh runs. This lives HERE
+        # so an edit to this repo cannot break the NixOS path while this repo's
+        # own `nix flake check` still passes.
+        nixos-vm = import ./nix/tests/nixos-vm.nix {
+          inherit pkgs;
+          lib = nixpkgs.lib;
+          dotfiles = self;
+          homeManagerModule = home-manager.nixosModules.home-manager;
+        };
+
+        # The consumer-facing CONTRACT, enforced rather than only documented.
+        # See ./nix/INTERFACE.md for what it guarantees and why each item is
+        # load-bearing.
+        interface = import ./nix/tests/interface.nix {
+          inherit pkgs self;
+          lib = nixpkgs.lib;
+        };
       });
 
       devShells = forAllSystems (pkgs: {

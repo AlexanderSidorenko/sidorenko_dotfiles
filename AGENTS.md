@@ -13,8 +13,14 @@ manifests/          — THE SOURCE OF TRUTH: packages.txt, links.txt, gsettings.
 nix/                — the Nix-side face: home.nix (home-manager module) and
                       manifest.nix (Nix reader for manifests/). Not needed by
                       install.sh; a machine without Nix is unaffected
-flake.nix           — exports nix/home.nix + packages.gitpane; how a NixOS host
-                      consumes this repo as a pinned input
+nix/INTERFACE.md    — THE CONSUMER CONTRACT. Read before touching nix/ or
+                      manifests/: an edit here can break another repo's machine
+nix/tests/          — nixos-vm.nix boots a NixOS VM carrying nix/home.nix;
+                      interface.nix enforces nix/INTERFACE.md. Both are
+                      `nix flake check` entries
+flake.nix           — exports nix/home.nix + packages.gitpane + the checks; how
+                      a NixOS host consumes this repo as a pinned input. Also
+                      holds the one copy of the nixpkgs rev
 tests/              — ubuntu-vm.sh boots a CLEAN Ubuntu cloud image under
                       QEMU/KVM, runs install.sh unattended, then measures the
                       result with manifests/verify-applied.sh; compare-platforms.sh
@@ -125,19 +131,36 @@ Reading `install.sh` proves nothing about whether it works; it is a thousand
 lines of idempotent-by-assertion shell. Two VM tests exercise it for real, and
 both run the **same** measurement script so the platforms cannot drift apart:
 
+**Both live in this repo**, deliberately: this repo is a dependency, and a
+test that lives in the consumer cannot stop an edit here from shipping broken.
+`nix flake check` covers the NixOS path *and* the contract without leaving
+this checkout.
+
 ```bash
+# Everything hermetic: manifests, the consumer contract, and a booted NixOS VM
+nix flake check
+
+# Just the NixOS VM, or just the contract
+nix build .#checks.x86_64-linux.nixos-vm
+nix build .#checks.x86_64-linux.interface
+
 # Ubuntu: clean cloud image -> install.sh --yes -> measure
 nix shell nixpkgs#qemu nixpkgs#cloud-utils nixpkgs#openssh nixpkgs#curl nixpkgs#iproute2 \
   --command ./tests/ubuntu-vm.sh
-./tests/ubuntu-vm.sh --packages   # also install the ~66 Nix packages (slow)
+./tests/ubuntu-vm.sh --packages   # also install the ~64 Nix packages (slow, 8 GiB VM)
 ./tests/ubuntu-vm.sh --shell      # drop into the guest afterwards to poke around
-
-# NixOS: a nixosTest living in the consuming repo, which imports nix/home.nix
-nix build <it_infra>#checks.x86_64-linux.desktop-dotfiles
 
 # Then compare the two runs on the checks they share
 ./tests/compare-platforms.sh
 ```
+
+`nix/tests/interface.nix` is the one that protects *consumers*: it asserts the
+module's option names and types, the manifest reader's functions, the flags
+their scripts are called with, and the kind/tag vocabulary — the things whose
+removal breaks a consumer **silently** (an unknown module option stops their
+whole system evaluating; a removed kind just stops matching rows). It is
+verified by breaking it on purpose: renaming an option, deleting a flag from a
+parser, and switching `livePath` to a path type are all caught.
 
 `compare-platforms.sh` is what makes "both platforms run the same checks" a
 testable claim rather than an assertion. It exits non-zero only on a real
@@ -213,6 +236,26 @@ shellcheck bin/lib/meminfo.sh    # has a `shell=bash` directive, no shebang
   Linux-only / GUI-only sections (`linux`, `gui` tags). Add `bin:NAME` when the
   command differs from the package name, or `nobin` when it provides no
   command, so `dotfiles_doctor` stays accurate.
+- **The nixpkgs rev is pinned, and `flake.nix` is the only copy of it.** The
+  Ubuntu path installs with `nix-env -f <pinned tarball>`, not
+  `nix-env -iA nixpkgs.X` against the machine's channel, and
+  `nix-packages.sh:nix_nixpkgs_rev` reads the rev back out of `flake.nix` with
+  grep (no jq — jq is one of the packages not yet installed). A flake's
+  `inputs` block cannot interpolate, so that literal URL is necessarily the
+  single source for this value.
+
+  This exists because the unpinned channel meant one package list installed
+  *different software per platform*. A VM test caught it: NixOS got
+  `eternal-terminal 6.2.11` (cached, fine) while Ubuntu got `7.0.0` (uncached,
+  failed to compile), and since `nix-env -iA` is all-or-nothing, that single
+  package left **all 64 uninstalled**.
+
+  `nix_install` **refuses** to fall back to the channel if the rev cannot be
+  read — a quiet fall-back would reintroduce the irreproducibility invisibly.
+  Keeping this rev equal to the consuming NixOS host's own pin is deliberate,
+  not automatic (this repo cannot read that one and stay standalone); it_infra's
+  `desktop/nixos-apply.sh` compares them and warns on drift. **Bump both
+  together.**
 - A tool that is **not in nixpkgs** gets a derivation at the repo root and an
   entry in `NIX_LOCAL_DERIVATIONS` (`nix-packages.sh`), as `"<file>.nix <attr>"`.
   `nix_install` builds those after the channel packages, so `nix_reinstall` —

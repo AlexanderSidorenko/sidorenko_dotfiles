@@ -1,18 +1,25 @@
 #!/usr/bin/env bash
 # Compare two verify-applied.sh TSV runs — typically Ubuntu vs NixOS.
 #
-# WHY. "Both platforms run the same checks" is a claim, and this is what makes
-# it checkable. The two VM tests each pass on their own terms; what they cannot
-# tell you alone is whether a thing that WORKS on one is quietly broken or
-# unmeasured on the other.
+# WHAT IS AND IS NOT BEING CHECKED. The criterion is COMPLETENESS: everything
+# the manifests ask for on a platform must actually be present on it. That is a
+# per-platform property, and each VM test already asserts it on its own side.
 #
-# The interesting output is not the counts, it is the disagreements:
+# VERSIONS ARE NOT COMPARED and are not expected to match. The two platforms
+# resolve the same package LIST against their own nixpkgs, so Ubuntu having a
+# different `bat` than NixOS is correct, not drift. Nothing here looks at
+# versions, and a difference in them is not a finding.
 #
-#   PASS vs FAIL   a real divergence. One platform configures something the
-#                  other does not. This exits non-zero.
-#   PASS vs SKIP   usually legitimate and expected — a headless cloud image
-#                  has no GNOME schemas, so every gsettings row is SKIP there
-#                  and PASS on a GUI NixOS host. Reported, not fatal.
+# What this adds on top of the two independent runs is the cross-check neither
+# can do alone: an item that one platform PROVES is achievable while the other
+# reports it missing. That asymmetry usually means a real gap in one side's
+# install path rather than a legitimate platform difference.
+#
+#   PASS vs FAIL   one platform has it, the other does not, and both tried.
+#                  A completeness gap. This exits non-zero.
+#   PASS vs SKIP   out of scope on one side — a headless cloud image has no
+#                  GNOME schemas, so every gsettings row is SKIP there and PASS
+#                  on a GUI NixOS host. Reported, not fatal.
 #   only on one    the manifests' platform/gui/nixos tags put it out of scope
 #                  on the other side. Reported, not fatal.
 #
@@ -36,14 +43,17 @@ if [[ -z $B ]]; then
   # agreement between 22 rows and nothing. Rank by ctime (when the path
   # entered the store) and consider only candidates that actually have rows.
   B="$(
-    for d in /nix/store/*-vm-test-run-desktop-dotfiles; do
+    # Both spellings: the test is named after this repo now, but a consumer
+    # re-exporting it may still produce the older store name.
+    for d in /nix/store/*-vm-test-run-sidorenko-dotfiles-nixos \
+             /nix/store/*-vm-test-run-desktop-dotfiles; do
       [[ -r "$d/verify.tsv" ]] || continue
       grep -qvE '^#|^$' "$d/verify.tsv" || continue
       printf '%s\t%s/verify.tsv\n' "$(stat -c '%Z' "$d")" "$d"
     done | sort -rn | head -1 | cut -f2
   )"
   [[ -n $B ]] || { echo "no NixOS run with a non-empty verify.tsv found.
-  Build it first:  nix build <it_infra>#checks.x86_64-linux.desktop-dotfiles
+  Build it first:  nix build .#checks.x86_64-linux.nixos-vm
   or pass the TSV explicitly." >&2; exit 2; }
 fi
 
@@ -77,7 +87,7 @@ printf 'counts   A: PASS=%s FAIL=%s SKIP=%s\n' \
 printf 'counts   B: PASS=%s FAIL=%s SKIP=%s\n\n' \
   "$(count "$B" PASS)" "$(count "$B" FAIL)" "$(count "$B" SKIP)"
 
-DIVERGED=0
+GAPS=0
 
 # --- the one that matters --------------------------------------------------
 both="$(join -t$'\t' -j1 "$TA" "$TB")"
@@ -85,11 +95,11 @@ real="$(awk -F'\t' '
   ($2=="PASS" && $3=="FAIL") || ($2=="FAIL" && $3=="PASS") {print}
 ' <<<"$both")"
 if [[ -n $real ]]; then
-  printf '\033[31mDIVERGENT\033[0m — configured on one platform, broken on the other:\n'
+  printf '\033[31mCOMPLETENESS GAP\033[0m — present on one platform, missing on the other:\n'
   awk -F'\t' '{printf "  %-50s A=%-5s B=%s\n", $1, $2, $3}' <<<"$real"
-  DIVERGED=1
+  GAPS=1
 else
-  printf '\033[32mNo divergence\033[0m — nothing passes on one platform and fails on the other.\n'
+  printf '\033[32mNo gaps\033[0m — nothing is present on one platform and missing on the other.\n'
 fi
 
 # --- scope differences, expected but worth seeing --------------------------
@@ -112,8 +122,8 @@ only_b="$(join -t$'\t' -j1 -v2 "$TA" "$TB")"
 shared_pass="$(awk -F'\t' '$2=="PASS" && $3=="PASS"' <<<"$both" | grep -c . || true)"
 printf '\nShared core: %s checks PASS on both.\n' "$shared_pass"
 
-if (( DIVERGED )); then
-  printf '\n\033[31mFAIL\033[0m — the platforms disagree about something they both measured.\n'
+if (( GAPS )); then
+  printf '\n\033[31mFAIL\033[0m — one platform is missing something the other proves installable.\n'
   exit 1
 fi
-printf '\033[32mOK\033[0m — the platforms agree everywhere they overlap.\n'
+printf '\033[32mOK\033[0m — every platform has everything its manifests ask for.\n'

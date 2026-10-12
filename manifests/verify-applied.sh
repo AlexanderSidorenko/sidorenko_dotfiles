@@ -6,6 +6,16 @@
 # a passing run is evidence rather than a tautology. apply-links.sh reporting
 # "12 linked" says what it tried to do; this says what is true afterwards.
 #
+# THE CRITERION IS COMPLETENESS: everything the manifests ask for on THIS
+# machine must actually be present on it. Every package named in packages.txt
+# has its command on PATH, every links.txt row has landed, every gsettings key
+# holds its declared value.
+#
+# VERSIONS ARE NOT CHECKED, and are not required to match any other machine.
+# Two platforms resolving the same package LIST against their own nixpkgs will
+# legitimately end up with different versions of the same tool; that is correct
+# rather than drift, and nothing here looks at it.
+#
 # ONE SCRIPT, BOTH PLATFORMS. The same file runs in a fresh Ubuntu VM after
 # install.sh and in a NixOS VM built from the flake, so the two are compared on
 # identical measurements instead of two hand-written checklists that drift.

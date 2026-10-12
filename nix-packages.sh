@@ -78,6 +78,52 @@ NIX_LOCAL_DERIVATIONS=(
 # the shell config exports SIDORENKO_DOTFILES, and the default covers neither.
 nix_dotdir() { _nixpkg_self_dir; }
 
+# --- The nixpkgs PIN -------------------------------------------------------
+#
+# WHY PIN AT ALL. The goal is that EVERY PACKAGE THIS ASKS FOR ACTUALLY GETS
+# INSTALLED. It is not that the versions match any other machine's — different
+# platforms running different versions of the same tool is fine and expected.
+#
+# This used to be `nix-env -iA nixpkgs.<name>`, resolving against whatever the
+# machine's `nix-channel` happened to be at that moment. That failed the goal
+# outright, and a VM test caught it doing so:
+#
+#   the channel offered eternal-terminal 7.0.0, which is not in the binary
+#   cache, so nix tried to build it and the build failed to compile (abseil
+#   needs C++20 <compare>). `nix-env -iA` is ALL-OR-NOTHING, so that one
+#   package left all 64 uninstalled.
+#
+# Pinning to a known rev means every name resolves to something already built
+# and cached, so the batch completes. That is the whole argument: reliability
+# and reproducibility of THIS install, nothing to do with matching elsewhere.
+#
+# THE REV LIVES IN ./flake.nix AND NOWHERE ELSE. A flake's `inputs` block
+# cannot interpolate, so the URL there must be literal — which makes it the
+# only possible single source for this value, and this function reads it back
+# out rather than keeping a second copy. Parsed with grep so a fresh Ubuntu box
+# needs no jq (jq is in packages.txt, i.e. one of the things not installed yet).
+#
+# Bumping it is a deliberate edit to flake.nix. A consumer's own pin may differ;
+# that is not a fault.
+nix_nixpkgs_rev() {
+  local flake rev
+  flake="$(nix_dotdir)/flake.nix"
+  [[ -r $flake ]] || return 1
+  rev="$(grep -oE 'github:NixOS/nixpkgs/[0-9a-f]{40}' "$flake" | head -1)"
+  rev="${rev##*/}"
+  [[ -n $rev ]] || return 1
+  printf '%s' "$rev"
+}
+
+# The pinned nixpkgs as something `nix-env -f` accepts. A tarball URL rather
+# than a flake ref so this works without the flakes feature enabled, which a
+# stock Nix install does not have.
+nix_nixpkgs_url() {
+  local rev
+  rev="$(nix_nixpkgs_rev)" || return 1
+  printf 'https://github.com/NixOS/nixpkgs/archive/%s.tar.gz' "$rev"
+}
+
 # Fail with the real reason rather than "installing 0 packages".
 _nix_packages_ready() {
   if (( ${#NIX_PACKAGES[@]} > 0 )); then
@@ -138,16 +184,42 @@ nix_install() {
 
   _nix_packages_ready || return 1
 
+  # Resolve against the PINNED nixpkgs, not the machine's channel. See
+  # nix_nixpkgs_rev above for why. Refused rather than silently falling back:
+  # a quiet fall-back to the channel would reintroduce exactly the
+  # irreproducibility this exists to remove, and would do it invisibly.
+  local url
+  if ! url="$(nix_nixpkgs_url)"; then
+    echo "nix_install: cannot read the nixpkgs pin from $(nix_dotdir)/flake.nix." >&2
+    echo "             Expected a 'github:NixOS/nixpkgs/<40-hex-rev>' URL there." >&2
+    echo "             Refusing to fall back to the channel: that is unpinned," >&2
+    echo "             and would install different versions than the NixOS side." >&2
+    return 1
+  fi
+
+  # Attribute names are top-level under -f, so no `nixpkgs.` prefix.
   local nix_args=() pkg
   for pkg in "${NIX_PACKAGES[@]}"; do
-    nix_args+=("nixpkgs.$pkg")
+    nix_args+=("$pkg")
   done
 
   # Quiet on success; only surface nix-env's output if the install fails.
-  echo "Installing ${#NIX_PACKAGES[@]} packages..."
+  echo "Installing ${#NIX_PACKAGES[@]} packages from pinned nixpkgs ${url##*/archive/}"
   local output
-  if ! output="$(nix-env -iA "${nix_args[@]}" 2>&1)"; then
+  if ! output="$(nix-env -f "$url" -iA "${nix_args[@]}" 2>&1)"; then
     printf '%s\n' "$output" >&2
+    # The usual cause is one package that is not in the binary cache for this
+    # rev and fails to build, which takes the whole batch down with it. Say so,
+    # because "64 packages failed" otherwise reads as something systemic.
+    local failed
+    failed="$(grep -oE "Cannot build '/nix/store/[a-z0-9]+-[^']*'" <<<"$output" |
+              sed -E "s|.*/[a-z0-9]{32}-|  |; s|'$||" | sort -u | head -5)"
+    if [[ -n $failed ]]; then
+      echo "nix_install: nix-env is all-or-nothing, and these failed to BUILD:" >&2
+      printf '%s\n' "$failed" >&2
+      echo "             Everything else was fine. Either the pin needs bumping to a" >&2
+      echo "             rev where they are cached, or drop them from packages.txt." >&2
+    fi
     return 1
   fi
 
