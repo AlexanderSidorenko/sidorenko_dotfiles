@@ -53,11 +53,33 @@
 # ARGUMENTS. `dotfiles` is the flake self-reference — the store copy of this
 # repo that gets seeded into the guest. A consumer re-exporting this check
 # passes its own `inputs.sidorenko-dotfiles`, which is the same tree.
-{ pkgs, lib, dotfiles, homeManagerModule }:
+#
+# `systemScope` picks WHICH OF THE TWO SUPPORTED ARRANGEMENTS is under test,
+# and both are exported as checks because both are real:
+#
+#   false  the module default. packages.txt goes into the user profile through
+#          home.packages, so one account has the toolchain.
+#   true   ../nixos.nix is imported as well and `managePackages = false`, so
+#          packages.txt goes into environment.systemPackages and root plus
+#          every other account have it too. This is what the desktop in
+#          it_infra runs, so it is the "test as you fly" half.
+#
+# One file rather than two because only the wiring differs: the seeding, the
+# session, and the measurement are identical, and a second copy of them would
+# be a second thing to keep in step. In system scope the test additionally
+# asserts the thing that arrangement exists for — that root and a second
+# account with no dotfiles at all can still run every command.
+{ pkgs, lib, dotfiles, homeManagerModule, systemScope ? false }:
 
 let
   user = "tester";
   home = "/home/${user}";
+
+  # A second account, only in system scope. It gets no dotfiles, no
+  # home-manager generation and no shell wiring — which is the point: if it can
+  # run the toolchain, the toolchain is genuinely on the machine rather than in
+  # one profile.
+  other = "bystander";
 
   # The dotfiles working tree must exist in the guest for the activation script
   # to link anything, and it must be WRITABLE and a git checkout — the module
@@ -96,12 +118,124 @@ let
     chown -R ${user}:users ${home}/.sidorenko_dotfiles
   '';
 
+  # Only in system scope: the assertions that distinguish it from the default
+  # arrangement. A `let` binding interpolated on one properly-indented line
+  # below, rather than a multi-line `${…}` inside testScript — that would put
+  # a line at column zero inside the string, which is how Nix decides how much
+  # indentation to strip, so every Python statement would arrive indented by
+  # four. An IndentationError produced by a Nix detail, in a file that reads
+  # fine.
+  systemScopeTests = lib.optionalString systemScope ''
+    # WHAT SYSTEM SCOPE EXISTS FOR. The run above proves the dotfiles user has
+    # the toolchain, and it would pass just as happily with everything in that
+    # one profile — which is the arrangement this scope replaces. So ask the
+    # question that distinguishes them: can accounts that have NO dotfiles run
+    # the same commands?
+    #
+    # root is the one that matters in practice (`sudo -i`, a unit, a rescue
+    # shell), and ${other} is the control: a plain account that no part of this
+    # repo has ever touched.
+    with subtest("root and a plain account get the same package set as the user"):
+        pkg_cmd = (
+            "bash ${dotfiles}/manifests/verify-applied.sh "
+            "--gui --nixos --platform linux --tsv "
+            "--skip links,gsettings,shell,git,ssh"
+        )
+
+        # Only the `packages` category survives the --skip list, so these are
+        # exactly "which commands resolve on this account's PATH".
+        #
+        # EVERY ACCOUNT GOES THROUGH `su -`, root included. Running it directly
+        # with machine.execute() looks equivalent and is not: the test driver's
+        # shell has no HOME, verify-applied.sh reads $HOME under `set -u`, and
+        # so the script died on line 45 and emitted nothing at all. `su -`
+        # gives each account the login environment a person would have.
+        #
+        # AND SILENCE IS CHECKED, because that failure was indistinguishable
+        # from the one this subtest hunts: a verifier that never reached the
+        # packages section reports zero commands, exactly like an account that
+        # has none. The first run of this test duly accused root of missing all
+        # 63 tools it could in fact run.
+        def commands_for(who):
+            rc, tsv = machine.execute("su - " + who + " -c " + shlex.quote(pkg_cmd))
+            rows = [r.split("\t") for r in tsv.splitlines()
+                    if r and not r.startswith("#")]
+            assert rows, (
+                f"verify-applied.sh produced no rows for {who} (rc={rc}), so it "
+                f"did not run and this measured nothing:\n{tsv}"
+            )
+            ok = set(c[2] for c in rows if c[0] == "PASS" and c[1] == "packages")
+            bad = set(c[2] for c in rows if c[0] == "FAIL" and c[1] == "packages")
+            return ok, bad
+
+        as_user, missing_user = commands_for("${user}")
+        as_root, missing_root = commands_for("root")
+        as_other, missing_other = commands_for("${other}")
+
+        print(
+            f"commands resolved: ${user}={len(as_user)} "
+            f"root={len(as_root)} ${other}={len(as_other)}"
+        )
+
+        # A floor, so an empty manifest or a verifier that died early cannot
+        # satisfy the equalities below by matching three empty sets.
+        assert len(as_user) >= 40, (
+            f"only {len(as_user)} commands resolved for ${user}; packages.txt "
+            "cannot be that short, so this measured nothing"
+        )
+        assert not missing_user, (
+            f"${user} cannot run: {sorted(missing_user)}. In this scope the "
+            "user's own toolchain comes from the system profile too, so this "
+            "is the same failure as root's."
+        )
+        assert not missing_root, (
+            f"root cannot run: {sorted(missing_root)}. The package set did not "
+            "reach environment.systemPackages."
+        )
+        assert not missing_other, (
+            f"${other} cannot run: {sorted(missing_other)}"
+        )
+        # Stated as an equality rather than another threshold: nobody on this
+        # machine is better equipped than anybody else.
+        assert as_root == as_user, (
+            "root and ${user} see different command sets; only root is missing "
+            f"{sorted(as_user - as_root)}, only ${user} is missing "
+            f"{sorted(as_root - as_user)}"
+        )
+        assert as_other == as_user, (
+            f"${other} and ${user} see different command sets: "
+            f"{sorted(as_user ^ as_other)}"
+        )
+
+    with subtest("the Nerd Font is system-wide, not inside one profile"):
+        # fonts.packages, not home.packages. Asked of fontconfig the way the
+        # accounts actually ask it, including the one with no dotfiles. The
+        # family is "DroidSansM Nerd Font" — one word up to the M, so the
+        # pattern has no space in it.
+        font_probe = "fc-list | grep -qi droidsansm"
+        for who in ["root", "${other}"]:
+            machine.succeed("su - " + who + " -c " + shlex.quote(font_probe))
+  '';
+
 in
 pkgs.testers.runNixOSTest {
-  name = "sidorenko-dotfiles-nixos";
+  name = "sidorenko-dotfiles-nixos" + lib.optionalString systemScope "-system";
 
   nodes.machine = { config, pkgs, ... }: {
-    imports = [ homeManagerModule ];
+    imports = [ homeManagerModule ] ++ lib.optionals systemScope [
+      dotfiles.nixosModules.default
+      # The control account, as an inline module rather than another
+      # `users.users.<name>` line below: two definitions of that path in one
+      # attrset literal is a duplicate-attribute error, and `mkIf` cannot be
+      # used because merely NAMING a key under users.users creates the account
+      # (with the submodule's defaults, i.e. a system user) whether the
+      # condition held or not.
+      #
+      # Deliberately plain: no dotfiles, no home-manager generation, no shell
+      # wiring. If it can run the toolchain, the toolchain is on the machine
+      # rather than in one profile.
+      { users.users.${other} = { isNormalUser = true; password = "test"; }; }
+    ];
 
     virtualisation = {
       memorySize = 4096;
@@ -139,8 +273,13 @@ pkgs.testers.runNixOSTest {
 
     programs.zsh.enable = true;
 
-    # Tools the verifier itself needs on PATH.
-    environment.systemPackages = with pkgs; [ git glib coreutils gnugrep gnused gawk diffutils ];
+    # Tools the verifier itself needs on PATH. fontconfig is for the
+    # system-scope font assertion: asking fc-list is the real question (does
+    # fontconfig SEE the font) rather than guessing which share/ directory
+    # NixOS put it in.
+    environment.systemPackages = with pkgs; [
+      git glib coreutils gnugrep gnused gawk diffutils fontconfig
+    ];
 
     # Seed the working tree before home-manager activates, since the
     # activation script links out of it.
@@ -166,6 +305,9 @@ pkgs.testers.runNixOSTest {
         gui = true;
         manageGnomeSettings = true;
         sourceRev = dotfiles.rev or "dirty";
+        # In system scope ../nixos.nix owns the package set, so the user
+        # profile must not declare it as well — see that option's description.
+        managePackages = !systemScope;
       };
     };
   };
@@ -267,5 +409,7 @@ pkgs.testers.runNixOSTest {
             f"only {len(passes)} checks passed; expected 50+ on a GUI NixOS "
             "host. Something is not being measured."
         )
+
+    ${systemScopeTests}
   '';
 }

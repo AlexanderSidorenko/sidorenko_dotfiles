@@ -16,6 +16,12 @@
 # Nothing here is specific to one machine or one user. Everything that varies
 # is an option below.
 #
+# ./nixos.nix IS THE COMPANION, not an alternative. This module owns everything
+# that lives in a $HOME; that one puts the package set into
+# environment.systemPackages so root and every other account get the toolchain
+# too. A host that imports both sets `managePackages = false` here, so the list
+# is declared once. See that file, and nix/INTERFACE.md § the two modules.
+#
 # PINNED FOR PACKAGES, LIVE FOR LINKS. The two manifests are read at two
 # different moments, on purpose:
 #
@@ -113,6 +119,24 @@ in
       '';
     };
 
+    managePackages = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Whether to install packages.txt into this user's profile.
+
+        Turn it OFF on a host that imports ./nixos.nix, which installs the same
+        list into `environment.systemPackages` so root and every other account
+        get it too. Leaving both on is not an error — the derivations are
+        identical — but the user profile would then shadow the system one on
+        PATH, and a later divergence between the two would be invisible.
+
+        Everything else this module does is unaffected: the symlinks, the shell
+        rc wiring, the git includes and the gsettings unit are all $HOME-scoped
+        and have no system-wide equivalent.
+      '';
+    };
+
     sourceRev = lib.mkOption {
       type = lib.types.str;
       default = "unknown";
@@ -126,15 +150,20 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    home.packages = dotfilePackages
+    # Empty when the host installs the list system-wide instead; see
+    # `managePackages` above and ./nixos.nix.
+    home.packages = lib.optionals cfg.managePackages (dotfilePackages
       ++ lib.optionals cfg.gui [
         # The Nerd Font, natively. The Ubuntu path copies the .otf out of the
         # repo into ~/.local/share/fonts (links.txt `copy` row, tagged
         # no-nixos); here the packaged font is strictly better — fontconfig
         # finds it in the profile with no cache step to get wrong.
         pkgs.nerd-fonts.droid-sans-mono
-      ];
+      ]);
 
+    # Left on regardless of `managePackages`: with the font installed
+    # system-wide through ./nixos.nix this is what makes the user's fontconfig
+    # see it, and it costs one config file either way.
     fonts.fontconfig.enable = cfg.gui;
 
     # shrc reads this to locate its own repo; exported so non-interactive

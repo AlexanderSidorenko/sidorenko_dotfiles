@@ -77,6 +77,13 @@
       # for any consumer that wants the module by path instead.
       homeModules.default = import ./nix/home.nix;
 
+      # The NixOS module, which installs the package set for EVERY account
+      # rather than one. Imported ALONGSIDE homeModules.default, not instead of
+      # it: that one owns everything living in a $HOME, this one owns
+      # environment.systemPackages. See nix/nixos.nix for why root wants the
+      # toolchain and why it deliberately does not get the dotfiles too.
+      nixosModules.default = import ./nix/nixos.nix;
+
       # The manifest reader, independent of home-manager. Takes { lib; }.
       lib.manifests = { lib }: import ./nix/manifest.nix { inherit lib; };
 
@@ -139,6 +146,20 @@
           lib = nixpkgs.lib;
           dotfiles = self;
           homeManagerModule = home-manager.nixosModules.home-manager;
+        };
+
+        # The same VM, wired the other supported way: nixosModules.default
+        # imported and `managePackages = false`, so the package set is in
+        # environment.systemPackages. It additionally asserts what that buys —
+        # root and an account with no dotfiles at all can run every command.
+        # Both arrangements are exported because both are real; it_infra's
+        # desktop runs this one.
+        nixos-vm-system = import ./nix/tests/nixos-vm.nix {
+          inherit pkgs;
+          lib = nixpkgs.lib;
+          dotfiles = self;
+          homeManagerModule = home-manager.nixosModules.home-manager;
+          systemScope = true;
         };
 
         # The consumer-facing CONTRACT, enforced rather than only documented.

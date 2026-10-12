@@ -26,17 +26,39 @@ content. It is only about what a Nix consumer may rely on.
 | Output | Guarantee |
 |---|---|
 | `homeModules.default` | A home-manager module. Importable, evaluates with no required arguments. |
+| `nixosModules.default` | A NixOS module. Installs the package set into `environment.systemPackages`. |
 | `lib.manifests` | A function taking `{ lib }` and returning the manifest reader. |
 | `packages.<system>.gitpane` | The one tool not in nixpkgs. |
 | `checks.<system>.manifests` | Manifest validation. |
 | `checks.<system>.nixos-vm` | The booted NixOS test (x86_64-linux only). |
+| `checks.<system>.nixos-vm-system` | The same, with the package set system-wide (x86_64-linux only). |
 | `checks.<system>.interface` | This contract. |
 
-A consumer may also re-export `checks.<system>.nixos-vm` as its own check, so
-the same test runs in both repos, built against whichever nixpkgs the consumer
-pins (its `follows` reaches our `nixpkgs` input).
+A consumer may also re-export either VM check as its own, so the same test runs
+in both repos, built against whichever nixpkgs the consumer pins (its `follows`
+reaches our `nixpkgs` input). **Re-export the one matching the arrangement you
+actually run** — they differ in where the packages land, which is the thing
+those tests measure.
 
-### Module options — `sidorenkoDotfiles.*`
+### The two modules, and which option tree you are in
+
+`sidorenkoDotfiles` is declared **twice**, in two option trees that never meet:
+
+| Set it at | Declared by | Owns |
+|---|---|---|
+| `home-manager.users.<name>.sidorenkoDotfiles` | `homeModules.default` | everything inside one `$HOME`: the symlinks, the shell rc wiring, the git includes, the gsettings unit — and, by default, the package set in that user's profile |
+| `sidorenkoDotfiles` (top level) | `nixosModules.default` | `environment.systemPackages` and `fonts.packages`, i.e. the package set for root and every account |
+
+Import both on a host that wants the toolchain machine-wide, and pair that with
+`managePackages = false` on the home-manager side so the list is declared once.
+Setting an option in the wrong tree is an unknown-option error, not a silent
+no-op.
+
+`nixosModules.default` deliberately installs **no dotfiles** — root gets the
+programs, not a `~/.zshrc` sourcing a file out of an unprivileged user's
+working tree, which would be a local privilege escalation. See `nix/nixos.nix`.
+
+### home-manager module options — `sidorenkoDotfiles.*`
 
 | Option | Type | Why a consumer needs it |
 |---|---|---|
@@ -44,7 +66,15 @@ pins (its `follows` reaches our `nixpkgs` input).
 | `livePath` | **str**, not path | Where the working tree lives. Must stay a string: a Nix path copies the repo into the store and makes every symlink immutable, defeating live editing. |
 | `gui` | bool | Gates `gui`-tagged packages and links. A headless host sets false. |
 | `manageGnomeSettings` | bool | Whether to install the gsettings user unit. |
+| `managePackages` | bool, default true | Whether packages.txt goes into this user's profile. Set false when `nixosModules.default` installs it system-wide instead. |
 | `sourceRev` | str | The rev the consumer pinned, so activation can warn when the live tree has moved past it. |
+
+### NixOS module options — `sidorenkoDotfiles.*`
+
+| Option | Type | Why a consumer needs it |
+|---|---|---|
+| `enable` | bool, default true | Turn the system package set off. |
+| `gui` | bool, default true | Gates `gui`-tagged packages and the Nerd Font. Keep equal to the home-manager module's `gui` on the same host. |
 
 **Renaming or removing any of these breaks consumers silently** — the module
 system errors on an unknown option, so the consumer's whole system stops

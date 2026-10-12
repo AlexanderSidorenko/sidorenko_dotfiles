@@ -10,16 +10,19 @@ manifests/          — THE SOURCE OF TRUTH: packages.txt, links.txt, gsettings.
                       plus the appliers both platforms run (apply-links.sh,
                       apply-gsettings.sh), the shared parser (manifest-lib.sh)
                       and validate.sh
-nix/                — the Nix-side face: home.nix (home-manager module) and
-                      manifest.nix (Nix reader for manifests/). Not needed by
-                      install.sh; a machine without Nix is unaffected
+nix/                — the Nix-side face: home.nix (home-manager module),
+                      nixos.nix (NixOS module) and manifest.nix (Nix reader
+                      for manifests/). Not needed by install.sh; a machine
+                      without Nix is unaffected
 nix/INTERFACE.md    — THE CONSUMER CONTRACT. Read before touching nix/ or
                       manifests/: an edit here can break another repo's machine
-nix/tests/          — nixos-vm.nix boots a NixOS VM carrying nix/home.nix;
-                      interface.nix enforces nix/INTERFACE.md. Both are
+nix/tests/          — nixos-vm.nix boots a NixOS VM carrying nix/home.nix, in
+                      either package scope (one profile, or system-wide via
+                      nix/nixos.nix) — exported as two checks;
+                      interface.nix enforces nix/INTERFACE.md. All are
                       `nix flake check` entries
-flake.nix           — exports nix/home.nix + packages.gitpane + the checks; how
-                      a NixOS host consumes this repo as a pinned input. Also
+flake.nix           — exports both modules + packages.gitpane + the checks;
+                      how a NixOS host consumes this repo as a pinned input. Also
                       holds the one copy of the nixpkgs rev
 tests/              — ubuntu-vm.sh boots a CLEAN Ubuntu cloud image under
                       QEMU/KVM, runs install.sh unattended, then measures the
@@ -100,12 +103,19 @@ that: nothing here may require another repo.
 
 **`nix/` is the Nix-side face**, and deliberately the only thing a consumer
 needs to know about. `nix/home.nix` is a home-manager module whose options
-(`livePath`, `gui`, `manageGnomeSettings`, `sourceRev`) carry everything
-machine-specific, so no consumer learns this repo's internal layout.
-`nix/manifest.nix` is the Nix reader for the manifests. `flake.nix` exports
-both plus `packages.gitpane` and a `nix flake check` that validates the
-manifests. None of it is needed by `install.sh`; a machine with no Nix at all
-works exactly as before.
+(`livePath`, `gui`, `manageGnomeSettings`, `managePackages`, `sourceRev`) carry
+everything machine-specific, so no consumer learns this repo's internal layout.
+`nix/nixos.nix` is its companion NixOS module: the same package list, read the
+same way, into `environment.systemPackages` instead of one profile, so root and
+every other account get the toolchain. `nix/manifest.nix` is the Nix reader for
+the manifests. `flake.nix` exports all of it plus `packages.gitpane` and a
+`nix flake check` that validates the manifests. None of it is needed by
+`install.sh`; a machine with no Nix at all works exactly as before.
+
+**Programs are shared; a user's configuration is not.** `nix/nixos.nix`
+installs packages for everyone and deliberately installs no dotfiles: wiring
+root's shell to source `shrc` out of `livePath` — a tree owned by an
+unprivileged user — would hand that user root at the next root login.
 
 **Pinned for packages, live for links.** On NixOS the package list is read at
 *evaluation* time from the pinned input (so a rebuild is reproducible and
@@ -128,8 +138,9 @@ still touches itself, `ensure_shrc_sources_repo` for RC injection. The old
 ## Testing in a VM
 
 Reading `install.sh` proves nothing about whether it works; it is a thousand
-lines of idempotent-by-assertion shell. Two VM tests exercise it for real, and
-both run the **same** measurement script so the platforms cannot drift apart:
+lines of idempotent-by-assertion shell. VM tests exercise it for real — one
+Ubuntu, two NixOS (one per package scope) — and they all run the **same**
+measurement script, so the platforms cannot drift apart:
 
 **Both live in this repo**, deliberately: this repo is a dependency, and a
 test that lives in the consumer cannot stop an edit here from shipping broken.
@@ -140,8 +151,9 @@ this checkout.
 # Everything hermetic: manifests, the consumer contract, and a booted NixOS VM
 nix flake check
 
-# Just the NixOS VM, or just the contract
-nix build .#checks.x86_64-linux.nixos-vm
+# Just one NixOS VM, or just the contract
+nix build .#checks.x86_64-linux.nixos-vm          # packages in the user profile
+nix build .#checks.x86_64-linux.nixos-vm-system   # packages system-wide; root too
 nix build .#checks.x86_64-linux.interface
 
 # Ubuntu: clean cloud image -> install.sh --yes -> measure

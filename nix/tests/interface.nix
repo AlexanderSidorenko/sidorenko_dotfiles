@@ -23,6 +23,7 @@ let
   # --- 1. Flake outputs a consumer names directly ---------------------------
   requiredOutputs = [
     [ "homeModules" "default" ]
+    [ "nixosModules" "default" ]
     [ "lib" "manifests" ]
   ];
 
@@ -57,9 +58,38 @@ let
     ];
   };
 
-  requiredOptions = [ "enable" "livePath" "gui" "manageGnomeSettings" "sourceRev" ];
+  requiredOptions = [
+    "enable" "livePath" "gui" "manageGnomeSettings" "sourceRev" "managePackages"
+  ];
   declaredOptions = builtins.attrNames (evaluated.options.sidorenkoDotfiles or { });
   missingOptions = builtins.filter (o: !(builtins.elem o declaredOptions)) requiredOptions;
+
+  # --- 2b. The NixOS module's own option surface ----------------------------
+  # A SECOND option tree with the same name. ../home.nix declares
+  # `sidorenkoDotfiles` inside home-manager's tree; ../nixos.nix declares it in
+  # the NixOS tree, and a consumer sets both on one host. They cannot collide,
+  # but they can drift — so the NixOS half is asserted here too rather than
+  # left to the VM test, which would only notice by failing to boot.
+  evaluatedNixos = lib.evalModules {
+    modules = [
+      self.nixosModules.default
+      # The minimum NixOS surface ../nixos.nix touches, as free-form options,
+      # so a contract check does not have to instantiate all of NixOS.
+      {
+        options = {
+          environment = lib.mkOption { type = lib.types.attrs; default = { }; };
+          fonts = lib.mkOption { type = lib.types.attrs; default = { }; };
+        };
+      }
+      { sidorenkoDotfiles.enable = false; }
+    ];
+  };
+
+  requiredNixosOptions = [ "enable" "gui" ];
+  declaredNixosOptions =
+    builtins.attrNames (evaluatedNixos.options.sidorenkoDotfiles or { });
+  missingNixosOptions =
+    builtins.filter (o: !(builtins.elem o declaredNixosOptions)) requiredNixosOptions;
 
   # livePath must stay a string. As a path it would copy the repo into the
   # store and make every symlink immutable, silently destroying live editing —
@@ -87,7 +117,7 @@ let
     "manifests/packages.txt" "manifests/links.txt" "manifests/gsettings.txt"
     "manifests/manifest-lib.sh" "manifests/apply-links.sh"
     "manifests/apply-gsettings.sh" "manifests/validate.sh"
-    "manifests/verify-applied.sh" "nix/manifest.nix" "nix/home.nix"
+    "manifests/verify-applied.sh" "nix/manifest.nix" "nix/home.nix" "nix/nixos.nix"
     "nix/INTERFACE.md" "flake.nix"
   ];
 
@@ -138,6 +168,13 @@ assert lib.assertMsg (missingOptions == [ ]) ''
   }
   A consumer setting a removed option fails to evaluate its ENTIRE system.
   See nix/INTERFACE.md.
+'';
+assert lib.assertMsg (missingNixosOptions == [ ]) ''
+  CONTRACT VIOLATION: the NixOS module's sidorenkoDotfiles is missing option(s): ${
+    lib.concatStringsSep ", " missingNixosOptions
+  }
+  nixosModules.default is what puts the package set in environment.systemPackages
+  so root and every other account get it. See nix/INTERFACE.md.
 '';
 assert lib.assertMsg livePathOk ''
   CONTRACT VIOLATION: sidorenkoDotfiles.livePath has type '${livePathType}', must be 'str'.
@@ -237,6 +274,7 @@ pkgs.runCommand "sidorenko-dotfiles-interface"
   echo "  ${toString (builtins.length samplePackages)} packages, ${
     toString (builtins.length sampleLinks)
   } links readable; shell rc = ${shellRow.source}"
-  echo "  options: ${lib.concatStringsSep " " requiredOptions}"
+  echo "  home-manager options: ${lib.concatStringsSep " " requiredOptions}"
+  echo "  nixos options:        ${lib.concatStringsSep " " requiredNixosOptions}"
   > $out
 ''
