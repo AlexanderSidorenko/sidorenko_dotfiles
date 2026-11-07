@@ -215,7 +215,6 @@ if [[ "$zswap_on" == "Y" ]]; then
     note "Durable fix is to put the module in the initramfs so it is there early:"
     note "  echo ${zswap_want_comp} | sudo tee -a /etc/initramfs-tools/modules"
     note "  sudo update-initramfs -u    # takes effect on the next boot"
-    note "bin/zswap-setup.sh does both; this is what it checks for."
   fi
 elif [[ -e /sys/block/zram0 ]]; then
   row "zram" "active on /dev/zram0"
