@@ -39,6 +39,17 @@ org.gnome.desktop.wm.keybindings     move-to-workspace-2          ['<Alt>2']
 org.gnome.desktop.wm.keybindings     move-to-workspace-3          ['<Alt>3']
 org.gnome.desktop.wm.keybindings     move-to-workspace-4          ['<Alt>4']
 
+# Alt+Tab cycles WINDOWS, one stop per window, so two Alacritty windows are two
+# entries rather than one app icon to drill into. GNOME's default binds Alt+Tab
+# to switch-applications and leaves switch-windows empty, so both halves have
+# to move: Alt+Tab is taken off the app switcher, which keeps Super+Tab.
+# Scoped to the current workspace, like the app switcher above.
+org.gnome.desktop.wm.keybindings     switch-windows               ['<Alt>Tab']
+org.gnome.desktop.wm.keybindings     switch-windows-backward      ['<Shift><Alt>Tab']
+org.gnome.desktop.wm.keybindings     switch-applications          ['<Super>Tab']
+org.gnome.desktop.wm.keybindings     switch-applications-backward ['<Shift><Super>Tab']
+org.gnome.shell.window-switcher      current-workspace-only       true
+
 # Alt+drag moves windows, Alt+right-drag resizes them.
 org.gnome.desktop.wm.preferences     mouse-button-modifier        '<Alt>'
 
