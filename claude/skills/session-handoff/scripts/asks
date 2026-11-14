@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# Print the user's own turns from a Claude Code session transcript - the
+# session's agenda, and after a compaction the only complete record of it.
+# A /clear ends a session, so only the turns after the last one are printed.
+# Usage: asks [--full] [--list] [<session-id>|<transcript.jsonl>]
+set -euo pipefail
+
+full=false
+list=false
+target=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      cat <<'EOF'
+usage: asks [--full] [--list] [<session-id>|<transcript.jsonl>]
+
+Prints one line per message the user actually typed, oldest first:
+
+  MM-DD HH:MM<TAB><text>
+
+Slash commands print as "/name args". Tool results, command output, task
+notifications and <system-reminder> blocks are dropped; each point where the
+context was summarised prints as "-- compaction boundary --", because the
+turns above the last one are the ones missing from the agent's head.
+
+A /clear ends a session. Everything above the last /clear is dropped, and a
+"-- /clear at ... --" line marks where this session starts. Claude Code also
+starts a fresh transcript at each /clear, so an earlier transcript from the
+same pane is a different session too.
+
+With no argument, reads this session's own transcript, named by
+$CLAUDE_CODE_SESSION_ID (Claude Code sets it in every agent shell). Without
+that variable it falls back to the most recently modified transcript for the
+current directory's project, which with several sessions open may be
+another one's. Pass a session id or a .jsonl path to pin one; --list shows
+the candidates. --full prints whole messages instead of the first 220
+characters.
+
+The trailing "window:" line gives the first and last turn after the last
+/clear, not counting /session-handoff itself, in the form repo-state --since
+wants. "window: empty" means the handoff request is the only turn.
+EOF
+      exit 0 ;;
+    --full) full=true; shift ;;
+    --list) list=true; shift ;;
+    -*) echo "asks: unknown option $1 (try --help)" >&2; exit 2 ;;
+    *) target="$1"; shift ;;
+  esac
+done
+
+projects="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"
+[[ -d "$projects" ]] || { echo "asks: no transcript store at $projects" >&2; exit 1; }
+
+if [[ "$list" == true ]]; then
+  find "$projects" -name '*.jsonl' -printf '%TY-%Tm-%Td %TH:%TM  %8sk  %p\n' 2>/dev/null \
+    | sed 's#\([0-9]\+\)k#\1#' | sort -r
+  exit 0
+fi
+
+by_id() {
+  find "$projects" -name "$1.jsonl" -print -quit 2>/dev/null || true
+}
+
+if [[ -n "$target" && -f "$target" ]]; then
+  tx="$target"; how="given path"
+elif [[ -n "$target" ]]; then
+  tx="$(by_id "$target")"; how="given session id"
+  [[ -n "$tx" ]] || { echo "asks: no transcript for session '$target' under $projects (try --list)" >&2; exit 1; }
+elif [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]]; then
+  tx="$(by_id "$CLAUDE_CODE_SESSION_ID")"; how="this session"
+  [[ -n "$tx" ]] || { echo "asks: no transcript for this session ($CLAUDE_CODE_SESSION_ID) under $projects (try --list)" >&2; exit 1; }
+else
+  dir="$projects/$(pwd | sed 's/[^a-zA-Z0-9]/-/g')"
+  [[ -d "$dir" ]] || dir="$projects"
+  # sed, not head: head exits early, sort dies of SIGPIPE, and pipefail
+  # turns that into a silent exit 141.
+  tx="$(find "$dir" -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -rn | sed -n '1s/^[^ ]* //p')"
+  how="newest transcript here - CLAUDE_CODE_SESSION_ID unset, so it may be another session's"
+  [[ -n "$tx" ]] || { echo "asks: no transcripts under $dir (try --list)" >&2; exit 1; }
+fi
+
+printf 'transcript: %s  (%s)\n\n' "$tx" "$how"
+
+# Pass 1 streams the (possibly huge) transcript down to one small record per
+# typed turn; pass 2 slurps only those records to cut at the last /clear.
+jq -c '
+  select(.type == "user" and (.isSidechain | not) and (.isMeta | not)
+         and (.message.content | type) == "string")
+  | (.timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) as $t
+  | (.message.content
+     | gsub("<system-reminder>.*?</system-reminder>"; ""; "m")
+     | gsub("^\\s+|\\s+$"; "")) as $c
+  | select($c != "")
+  | if ($c | test("^<(local-command-(caveat|stdout|stderr)|task-notification)"))
+      then empty
+    elif ($c | test("^<command-(name|message)>"))
+      then { t: $t, k: "cmd",
+             c: ([ ($c | capture("<command-name>(?<n>[^<]*)</command-name>").n),
+                   (($c | capture("<command-args>(?<a>[^<]*)</command-args>").a) // "") ]
+                 | map(select(. != "")) | join(" ")) }
+    elif ($c | test("^<artifact-content-authored-by-others/>|This session is being continued from a previous conversation"))
+      then { t: $t, k: "compaction", c: "-- compaction boundary --" }
+    else { t: $t, k: "text", c: $c } end
+' "$tx" | jq -rs --argjson full "$full" '
+  def stamp: strflocaltime("%m-%d %H:%M");
+  def iso: strflocaltime("%Y-%m-%dT%H:%M:%S");
+  . as $all
+  | ([ range(length) | select($all[.].k == "cmd" and $all[.].c == "/clear") ] | last) as $ci
+  | (if $ci == null then $all else $all[$ci + 1:] end) as $turns
+  | [ $turns[] | select(.k != "compaction" and (.c | test("^/session-handoff( |$)") | not)) ] as $asks
+  | (if $ci == null then empty
+     else "-- /clear at \($all[$ci].t | stamp): this session starts here; nothing before it is this session --"
+     end),
+    ($turns[] | "\(.t | stamp)\t\(.c | gsub("\\s+"; " ") | if $full then . else .[0:220] end)"),
+    "",
+    (if ($asks | length) == 0
+     then "window: empty - no turns \(if $ci == null then "in this session" else "since the /clear" end) but the handoff request"
+     else "window: \($asks[0].t | iso) .. \($asks[-1].t | iso)  (\($asks | length) turns)"
+     end)
+'

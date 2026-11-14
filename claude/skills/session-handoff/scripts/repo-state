@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# Ground truth for a handoff: what is pushed, what is committed but not
+# pushed, what is only in the working tree, and which of it was touched
+# inside the session window. Usage: repo-state [--since <when>] [dir ...]
+set -euo pipefail
+
+since=""
+fetch=true
+max=120
+dirs=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      cat <<'EOF'
+usage: repo-state [--since <when>] [--no-fetch] [--max <n>] [dir ...]
+
+Prints, per repository (default: the current directory):
+
+  fetch + ahead/behind against the upstream branch
+  commits made inside the window, each marked pushed or NOT PUSHED
+  commits that exist only locally, whatever their age
+  the working tree (--porcelain -uall), each path with its mtime and,
+    with --since, whether it was touched inside the window
+  diffstat totals for staged and unstaged work, and any stashes
+
+--since takes anything `date -d` understands, including the ISO stamp the
+asks script prints on its "window:" line. Paths older than it are flagged
+"pre-window", which usually means another session or the user's editor
+changed them - not this session's work.
+
+--no-fetch skips the network (ahead/behind then reflects the last fetch).
+--max caps the working-tree listing per repo (default 120).
+This is a report, not a check: a dirty tree still exits 0, and only a path
+that is not inside a repository makes it exit non-zero.
+EOF
+      exit 0 ;;
+    --since) since="${2-}"; [[ -n "$since" ]] || { echo "repo-state: --since needs a value" >&2; exit 2; }; shift 2 ;;
+    --no-fetch) fetch=false; shift ;;
+    --max) max="${2-}"; shift 2 ;;
+    -*) echo "repo-state: unknown option $1 (try --help)" >&2; exit 2 ;;
+    *) dirs+=("$1"); shift ;;
+  esac
+done
+[[ ${#dirs[@]} -gt 0 ]] || dirs=(".")
+
+since_epoch=""
+if [[ -n "$since" ]]; then
+  since_epoch="$(date -d "$since" +%s 2>/dev/null)" \
+    || { echo "repo-state: --since '$since' is not a date date(1) understands" >&2; exit 2; }
+fi
+
+rc=0
+for d in "${dirs[@]}"; do
+  if ! top="$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)"; then
+    echo "repo-state: $d is not inside a git repository" >&2
+    rc=1
+    continue
+  fi
+  ( cd "$top"
+
+  branch="$(git symbolic-ref --short -q HEAD || echo "DETACHED at $(git rev-parse --short HEAD)")"
+  upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+  printf '=== %s  [%s%s]\n' "$top" "$branch" "${upstream:+ -> $upstream}"
+
+  if [[ "$fetch" == true ]]; then
+    if git fetch --all --quiet 2>/dev/null; then
+      printf 'fetch:  ok (%s)\n' "$(git remote | paste -sd, -)"
+    else
+      printf 'fetch:  FAILED - ahead/behind below is from the last successful fetch\n'
+    fi
+  else
+    printf 'fetch:  skipped\n'
+  fi
+
+  if [[ -n "$upstream" ]]; then
+    read -r behind ahead < <(git rev-list --left-right --count "$upstream...HEAD" | tr '\t' ' ')
+    printf 'sync:   %s ahead, %s behind %s\n' "$ahead" "$behind" "$upstream"
+    if [[ "$behind" != "0" ]]; then
+      printf '        rebase onto %s before touching the tree\n' "$upstream"
+    fi
+    unpushed="$(git log --format='%H' "$upstream..HEAD")"
+  else
+    printf 'sync:   no upstream for %s - nothing here is on a remote\n' "$branch"
+    unpushed="$(git log --format='%H')"
+  fi
+
+  if [[ -n "$since" ]]; then
+    printf -- '--- commits in window (since %s) ---\n' "$since"
+    win="$(git log --since="$since" --format='%H%x09%h%x09%cr%x09%s')"
+    if [[ -z "$win" ]]; then
+      printf '(none)\n'
+    else
+      while IFS=$'\t' read -r sha short age subj; do
+        if grep -q "^$sha$" <<<"$unpushed"; then mark="NOT PUSHED"; else mark="pushed"; fi
+        printf '%s  %-10s %-11s %s\n' "$short" "$age" "$mark" "$subj"
+      done <<<"$win"
+    fi
+  fi
+
+  printf -- '--- local-only commits ---\n'
+  if [[ -z "$unpushed" ]]; then
+    printf '(none - every commit is on %s)\n' "${upstream:-the remote}"
+  else
+    git log --format='%h  %cr  %s' ${upstream:+"$upstream..HEAD"}
+  fi
+
+  printf -- '--- working tree ---\n'
+  # One NUL-separated field per entry, plus a second field for the original
+  # path of a rename or copy; slurped so that pairing them needs no second
+  # read off the loop's own stdin.
+  tracked=() untracked=() fields=()
+  mapfile -d '' -t fields < <(git -c core.quotePath=false status --porcelain=v1 -uall -z)
+  i=0
+  while (( i < ${#fields[@]} )); do
+    entry="${fields[i]}"; i=$(( i + 1 ))
+    xy="${entry:0:2}"; path="${entry:3}"
+    if [[ "$xy" == R* || "$xy" == C* ]] && (( i < ${#fields[@]} )); then
+      show="${fields[i]} -> $path"; i=$(( i + 1 ))
+    else
+      show="$path"
+    fi
+    if [[ -e "$path" ]]; then
+      mtime="$(stat -c '%Y' "$path")"
+      when="$(date -d "@$mtime" '+%m-%d %H:%M')"
+      if [[ -n "$since_epoch" ]]; then
+        if [[ "$mtime" -ge "$since_epoch" ]]; then age="in-window"; else age="pre-window"; fi
+      else age=""; fi
+    else
+      when="gone"; age=""
+    fi
+    line="$(printf '%-3s %-11s %-10s %s' "$xy" "$when" "$age" "$show")"
+    if [[ "$xy" == '??' ]]; then untracked+=("$line"); else tracked+=("$line"); fi
+  done
+
+  n=$(( ${#tracked[@]} + ${#untracked[@]} ))
+  if [[ "$n" -eq 0 ]]; then
+    printf '(clean)\n'
+  else
+    printf '%s changed, %s untracked\n' "${#tracked[@]}" "${#untracked[@]}"
+    printf '%s\n' ${tracked[@]+"${tracked[@]}"} ${untracked[@]+"${untracked[@]}"} | sed -n "1,${max}p"
+    if [[ "$n" -gt "$max" ]]; then
+      printf '... and %s more (raise --max, or inspect git status yourself)\n' "$(( n - max ))"
+    fi
+    st="$(git diff --cached --shortstat | sed 's/^ //')"
+    un="$(git diff --shortstat | sed 's/^ //')"
+    printf 'staged:   %s\n' "${st:-nothing}"
+    printf 'unstaged: %s\n' "${un:-nothing}"
+  fi
+
+  stash="$(git stash list)"
+  if [[ -n "$stash" ]]; then
+    printf -- '--- stash ---\n'
+    printf '%s\n' "$stash"
+  fi
+  printf '\n'
+  )
+done
+exit "$rc"
