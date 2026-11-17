@@ -43,20 +43,44 @@
 # Read-only with respect to tmux: it queries the server and writes one file.
 # Needs no root. Safe to call from a tmux hook on every layout change.
 #
+# GENERATIONS
+#
+# Each write rotates the previous file down a numbered ring, .1 (newest) to .N,
+# because the capture worth keeping is the one taken before the tmux server
+# died, and by the time anyone wants it, several writes have already happened.
+#
+# The server dies without a reboot: a compositor crash takes down the scopes its
+# panes live in, so tmux goes with it while the machine stays up. The replacement
+# layout you then build by hand is itself a run of distinct layout changes —
+# every new session, and every long-running program starting or exiting — and
+# each one consumes a generation. One spare covers none of that: it is gone
+# before you have finished opening the sessions you want to restore into.
+#
+# Depth is sized against the writes that actually land, which is far fewer than
+# the hooks that fire. A capture is written only when the generated script
+# differs from the current one, so a command that returns before tmux recomputes
+# the window name rewrites nothing at all (measured: six ordinary commands in an
+# attached session produced three writes). What does cost a generation is
+# structural change and a program that lives long enough to be seen. Twenty
+# slots hold roughly ten real layouts, since a program starting and exiting
+# flips between two states, and twenty generations of this cost ~100 KB.
+#
 # Usage:
-#   tmux-snapshot [--out PATH] [--force] [--quiet] [--print] [--help]
+#   tmux-snapshot [--out PATH] [--keep N] [--force] [--quiet] [--print] [--help]
 #
 #   --out PATH     write the restore script here (default below)
+#   --keep N       previous generations to keep, .1 to .N (default 20)
 #   --force        skip the debounce interval (for the manual keybinding)
 #   --quiet        say nothing unless something goes wrong (for hooks)
 #   --print        write nothing; dump the generated script to stdout
 #
-# Env fallbacks: TMUX_SNAPSHOT_OUT, XDG_STATE_HOME
+# Env fallbacks: TMUX_SNAPSHOT_OUT, TMUX_SNAPSHOT_KEEP, XDG_STATE_HOME
 
 set -euo pipefail
 
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/tmux-snapshot"
 OUT="${TMUX_SNAPSHOT_OUT:-$STATE_DIR/restore-tmux-sessions.sh}"
+KEEP="${TMUX_SNAPSHOT_KEEP:-20}"
 FORCE=""
 QUIET=""
 PRINT=""
@@ -74,6 +98,14 @@ while [[ $# -gt 0 ]]; do
     ;;
   --out=*)
     OUT="${1#*=}"
+    shift
+    ;;
+  --keep)
+    KEEP="${2:?--keep needs a value}"
+    shift 2
+    ;;
+  --keep=*)
+    KEEP="${1#*=}"
     shift
     ;;
   --force)
@@ -108,6 +140,9 @@ die() {
   printf '\033[0;31mtmux-snapshot: %s\033[0m\n' "$*" >&2
   exit 1
 }
+
+[[ "$KEEP" =~ ^[0-9]+$ && "$KEEP" -ge 1 ]] \
+  || die "--keep needs a positive integer, got: $KEEP"
 
 command -v tmux >/dev/null 2>&1 || die "tmux not found on PATH"
 tmux has-session 2>/dev/null || {
@@ -471,13 +506,16 @@ fi
 
 # Never let an automatic capture SHRINK a snapshot taken before this boot.
 #
-# The empty-server guard above protects the shutdown direction. Startup is the
-# mirror image and was unprotected: after a reboot the pre-boot capture is the
-# only record of the layout to restore, yet the first `tmux` creates a bare
-# one-pane session, and to the hooks that is an ordinary layout change. It gets
-# written, demoting the good capture to .prev; the next rename or resize writes
-# again and .prev is gone too. The layout is then unrecoverable, and restore
-# has nothing left to rebuild from.
+# The empty-server guard above protects the shutdown direction; this is the
+# mirror image. After a reboot the pre-boot capture is the only record of the
+# layout to restore, yet the first `tmux` creates a bare one-pane session, and
+# to the hooks that is an ordinary layout change.
+#
+# The generation ring means such a write no longer destroys that capture, but it
+# does bury it: whichever file `tmux-restore` reaches for by default would then
+# describe the bare session rather than the layout worth rebuilding. Holding the
+# write keeps the obvious path pointing at the right layout, so recovery does
+# not depend on reading the ring and choosing correctly.
 #
 # Only automatic captures are held back. prefix C-s passes --force, and any
 # capture at least as large as the stored one still lands — so this releases
@@ -497,16 +535,39 @@ if [[ -z "$FORCE" && -f "$OUT" ]]; then
 fi
 
 # Only write when something actually changed. This is what makes it safe to hang
-# the snapshot off chatty hooks like pane-focus-out: an unchanged layout costs a
-# comparison and nothing else, and — more importantly — .prev keeps holding the
-# last DIFFERENT layout instead of being churned into a copy of the current one,
-# which is the entire reason .prev exists.
+# the snapshot off chatty hooks: an unchanged layout costs a comparison and
+# nothing else, and — more importantly — the generation ring goes on holding
+# DIFFERENT layouts rather than filling with copies of the current one, which is
+# the entire reason it has depth.
 if [[ -f "$OUT" ]] && cmp -s <(sed '/^# Captured:/d' "$GEN") <(sed '/^# Captured:/d' "$OUT"); then
   say "layout unchanged — $OUT left as is"
   exit 0
 fi
 
-[[ -f "$OUT" ]] && cp -p "$OUT" "$OUT.prev"
+# Shift every kept generation one slot older, dropping what falls off the end,
+# and free .1 for the layout being replaced. Walked oldest-first so each file is
+# moved only after its destination has been vacated.
+rotate_generations() {
+  local i
+  rm -f -- "$OUT.$KEEP"
+  for ((i = KEEP - 1; i >= 1; i--)); do
+    if [[ -f "$OUT.$i" ]]; then
+      mv -f -- "$OUT.$i" "$OUT.$((i + 1))"
+    fi
+  done
+}
+
+# A spare left under the pre-ring name is still a generation, and on a machine
+# that has not captured since, it is the only other layout on disk. Fold it in
+# rather than rotate past it and strand it.
+if [[ -f "$OUT.prev" && ! -f "$OUT.1" ]]; then
+  mv -f -- "$OUT.prev" "$OUT.1"
+fi
+
+if [[ -f "$OUT" ]]; then
+  rotate_generations
+  cp -p -- "$OUT" "$OUT.1"
+fi
 cp "$GEN" "$OUT"
 chmod 0700 "$OUT"   # personal state, and it is executable on purpose
 

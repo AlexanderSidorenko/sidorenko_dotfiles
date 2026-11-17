@@ -7,15 +7,31 @@
 # type after a reboot. This is the front door: it finds the file, tells you how
 # old it is before running it, and forwards its flags.
 #
-# Recovery: --prev runs the previous generation instead. tmux-snapshot keeps one,
-# which matters because the snapshot rewrites itself on every layout change — if
-# a bad capture lands, the good one is still there for exactly one write.
+# RECOVERY
+#
+# tmux-snapshot keeps a ring of previous generations, .1 (newest) to .N, because
+# the layout worth restoring is the one captured before the tmux server died and
+# several writes usually land before anyone goes looking for it. --list shows the
+# ring and --gen N runs one of them.
+#
+# --list marks every generation captured before the running tmux server started.
+# Those describe a layout from a previous server — which is exactly what a crash
+# leaves behind — so after losing a session the newest marked generation is
+# normally the one to restore. Unmarked generations were captured by the server
+# that is running now and only wind back changes made since it started.
+#
+# Restoring is additive and safe to repeat: the generated script leaves any
+# session that already exists completely untouched, so running the wrong
+# generation creates whatever is missing rather than disturbing what is up, and
+# running another afterwards fills in the rest.
 #
 # Usage:
-#   tmux-restore [--prev] [--no-attach] [--dry-run] [--path] [--help]
+#   tmux-restore [--list] [--gen N|--prev] [--no-attach] [--dry-run] [--path]
 #
-#   --prev         run the previous snapshot rather than the current one
-#   --path         print the snapshot path and exit
+#   --list         show the kept generations, newest first, and exit
+#   --gen N        run generation N from the ring instead of the current capture
+#   --prev         the generation before the current one (same as --gen 1)
+#   --path         print the path that would be run and exit
 #   --no-attach    create the sessions but do not attach
 #   --dry-run      print what would happen, change nothing
 #
@@ -24,18 +40,38 @@
 set -euo pipefail
 
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/tmux-snapshot"
-SNAP="${TMUX_SNAPSHOT_OUT:-$STATE_DIR/restore-tmux-sessions.sh}"
+BASE="${TMUX_SNAPSHOT_OUT:-$STATE_DIR/restore-tmux-sessions.sh}"
+GEN=""
+LIST=""
+SHOW_PATH=""
 PASS=()
+
+die() {
+  printf '\033[0;31mtmux-restore: %s\033[0m\n' "$*" >&2
+  exit 1
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
   --prev)
-    SNAP="$SNAP.prev"
+    GEN=1
+    shift
+    ;;
+  --gen)
+    GEN="${2:?--gen needs a value}"
+    shift 2
+    ;;
+  --gen=*)
+    GEN="${1#*=}"
+    shift
+    ;;
+  --list | --ls)
+    LIST=1
     shift
     ;;
   --path)
-    printf '%s\n' "$SNAP"
-    exit 0
+    SHOW_PATH=1
+    shift
     ;;
   -h | --help)
     sed -n '/^# Usage:/,/^# Env fallbacks/{p;/^# Env fallbacks/q}' "$0" \
@@ -49,13 +85,125 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -n "$GEN" ]]; then
+  [[ "$GEN" =~ ^[0-9]+$ && "$GEN" -ge 1 ]] \
+    || die "--gen needs a positive integer, got: $GEN"
+fi
+
+# Epoch seconds at which the running tmux server started, or nothing when no
+# server is up.
+#
+# Field 22 of /proc/<pid>/stat is the process start time in clock ticks since
+# boot. The mtime of /proc/<pid> is NOT this and must not be substituted for it:
+# that timestamp tracks later activity in the directory, and on a server whose
+# panes keep changing it reads many minutes late — enough to mark a generation
+# as predating a server that was in fact already running when it was captured.
+tmux_server_start_epoch() {
+  local pid raw rest ticks btime hz
+  command -v tmux >/dev/null 2>&1 || return 0
+  pid=$(tmux display-message -p '#{pid}' 2>/dev/null) || return 0
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  [[ -r /proc/$pid/stat ]] || return 0
+  raw=$(</proc/"$pid"/stat)
+  # comm (field 2) is parenthesised and may contain spaces or ')', so the only
+  # safe split is after the LAST ')'. What remains starts at field 3, putting
+  # field 22 at position 20.
+  rest=${raw##*) }
+  # shellcheck disable=SC2086
+  set -- $rest
+  ticks=${20:-}
+  [[ "$ticks" =~ ^[0-9]+$ ]] || return 0
+  btime=$(awk '/^btime /{print $2}' /proc/stat 2>/dev/null || true)
+  [[ "$btime" =~ ^[0-9]+$ ]] || return 0
+  hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
+  [[ "$hz" =~ ^[0-9]+$ && "$hz" -gt 0 ]] || hz=100
+  printf '%s' "$((btime + ticks / hz))"
+}
+
+# Suffixes of the kept generations, oldest-numbered last. A non-numeric suffix
+# is not a generation (.prev from before the ring, .lock) and is skipped.
+generation_suffixes() {
+  local f sfx
+  for f in "$BASE".*; do
+    [[ -f "$f" ]] || continue
+    sfx=${f##*.}
+    [[ "$sfx" =~ ^[0-9]+$ ]] || continue
+    printf '%s\n' "$sfx"
+  done | sort -n
+}
+
+describe() {
+  local f=$1 label=$2 now=$3 srv=$4 ts age layout mark=""
+  ts=$(stat -c %Y "$f")
+  age=$((now - ts))
+  layout=$(sed -n 's/^# Layout: //p' "$f" | head -1)
+  if [[ -n "$srv" && "$ts" -lt "$srv" ]]; then
+    mark='  <- predates the running server'
+  fi
+  printf '%5s  %-19s  %4dh %02dm  %-34s%s\n' \
+    "$label" "$(date -d "@$ts" '+%Y-%m-%d %H:%M:%S')" \
+    "$((age / 3600))" "$(((age % 3600) / 60))" \
+    "${layout:-unknown layout}" "$mark"
+}
+
+if [[ -n "$LIST" ]]; then
+  now=$(date +%s)
+  srv=$(tmux_server_start_epoch)
+  printf '\033[2msnapshots in %s\033[0m\n\n' "$(dirname "$BASE")"
+  printf '\033[1m%5s  %-19s  %9s  %s\033[0m\n' "gen" "captured" "age" "layout"
+  found=0
+  if [[ -f "$BASE" ]]; then
+    describe "$BASE" "now" "$now" "$srv"
+    found=1
+  fi
+  while IFS= read -r sfx; do
+    [[ -n "$sfx" ]] || continue
+    describe "$BASE.$sfx" "$sfx" "$now" "$srv"
+    found=1
+  done < <(generation_suffixes)
+  # Only present until the next capture migrates it into the ring.
+  if [[ -f "$BASE.prev" ]]; then
+    describe "$BASE.prev" "prev" "$now" "$srv"
+    found=1
+  fi
+  if [[ "$found" -eq 0 ]]; then
+    printf '\n(none yet — take one while your sessions are up: tmux-snapshot --force)\n'
+    exit 0
+  fi
+  if [[ -z "$srv" ]]; then
+    printf '\n\033[2mNo tmux server running, so nothing is marked; after a crash the\n'
+    printf 'generations above the layout you lost are the ones to try.\033[0m\n'
+  fi
+  printf '\nRun one with:  tmux-restore --gen N\n'
+  exit 0
+fi
+
+SNAP="$BASE"
+if [[ -n "$GEN" ]]; then
+  SNAP="$BASE.$GEN"
+  # A spare still under the pre-ring name IS generation 1, until a capture
+  # folds it into the ring.
+  if [[ ! -f "$SNAP" && "$GEN" -eq 1 && -f "$BASE.prev" ]]; then
+    SNAP="$BASE.prev"
+  fi
+fi
+
+if [[ -n "$SHOW_PATH" ]]; then
+  printf '%s\n' "$SNAP"
+  exit 0
+fi
+
 if [[ ! -f "$SNAP" ]]; then
   printf '\033[0;31mtmux-restore: no snapshot at %s\033[0m\n' "$SNAP" >&2
-  printf 'Take one while your sessions are up:  tmux-snapshot --force\n' >&2
+  if [[ -n "$GEN" ]]; then
+    printf 'See what is kept with:  tmux-restore --list\n' >&2
+  else
+    printf 'Take one while your sessions are up:  tmux-snapshot --force\n' >&2
+  fi
   exit 1
 fi
 
-age=$(( $(date +%s) - $(stat -c %Y "$SNAP") ))
+age=$(($(date +%s) - $(stat -c %Y "$SNAP")))
 printf '\033[2mrestoring %s (captured %dh %dm ago)\033[0m\n' \
   "$SNAP" "$((age / 3600))" "$(((age % 3600) / 60))"
 
