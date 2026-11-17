@@ -6,6 +6,7 @@
   "skipDangerousModePermissionPrompt": true,
   "agentPushNotifEnabled": true,
   "theme": "dark",
+  "cleanupPeriodDays": 36500,
   "modelSettings": {
     "claude-opus-5-5": {
       "effortLevel": "xhigh"
