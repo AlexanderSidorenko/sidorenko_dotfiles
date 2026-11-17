@@ -89,7 +89,11 @@ while [[ $# -gt 0 ]]; do
     shift
     ;;
   -h | --help)
-    sed -n '/^# Usage:/,/^# Env fallbacks/p' "$0" | sed 's/^# \{0,1\}//'
+    # Quit at the first end anchor. The generated restore script carries its own
+    # "# Usage:" header in a heredoc below, so an unterminated second range would
+    # otherwise re-open and print the rest of this file.
+    sed -n '/^# Usage:/,/^# Env fallbacks/{p;/^# Env fallbacks/q}' "$0" \
+      | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   *)
