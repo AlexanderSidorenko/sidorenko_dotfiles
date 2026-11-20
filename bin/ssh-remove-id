@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# ssh-remove-id: the inverse of ssh-copy-id. Deletes a public key from a
+# remote account's ~/.ssh/authorized_keys.
+#
+#   ssh-remove-id [-n] [-f] [-t PATH] -i KEY [-i KEY ...] [ssh options] [user@]host
+#
+#   -i KEY   the key to remove: its .pub, or the private key, FIDO handle or
+#            .tpm file next to one (KEY.pub is read). Repeatable.
+#   -n       dry run: show the lines that would go, change nothing
+#   -f       allow removing the key this login itself used (see Lockout)
+#   -t PATH  the remote file, relative to the remote $HOME unless absolute
+#            (default .ssh/authorized_keys)
+#   -p PORT, -o OPTION, -F CONFIG, -J JUMP, -l USER go to ssh unchanged.
+#
+# A line goes when any of its whitespace-separated fields is exactly the key's
+# base64 blob. Options in front of a key (`verify-required`, `command=...`) and
+# the comment after it make no difference: the key is what matches.
+#
+# Three logins, each authenticating afresh (connection sharing is off):
+#   1. list    print the lines that match. None → nothing to do, exit 0.
+#   2. remove  write the file without them, keep the previous one beside it
+#              as <file>.before-ssh-remove-id, and move the new one into place.
+#   3. check   log in again and list: nothing may match. This login also shows
+#              that some other key still gets in.
+#
+# Lockout. Login 1 records which key the server accepted (ssh's debug log).
+# When that is one of the keys being removed, nothing shows that another key
+# works, so it stops unless -f. It never leaves the file with no keys. A file
+# that is a symlink or not writable (home-manager), and keys that NixOS puts in
+# /etc/ssh/authorized_keys.d/<user> (users.users.<name>.openssh.authorizedKeys),
+# are reported and left alone: remove those keys from that config instead.
+#
+# Not for forges or RouterOS, which keep keys in their own databases:
+#   GitHub    gh ssh-key list; gh ssh-key delete <id>
+#   Forgejo   Settings → SSH / GPG Keys
+#   RouterOS  /user/ssh-keys/remove [find info~"<comment>"]
+set -euo pipefail
+
+die() { printf 'ssh-remove-id: %s\n' "$*" >&2; exit 1; }
+usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; }
+
+keys=() ssh_args=() dry=0 force=0 target=.ssh/authorized_keys
+while (($#)); do
+  case $1 in
+    -h|--help) usage; exit 0 ;;
+    -n) dry=1; shift ;;
+    -f) force=1; shift ;;
+    -i|-t|-p|-o|-F|-J|-l)
+      (($# >= 2)) || die "$1 needs a value"
+      case $1 in
+        -i) keys+=("$2") ;;
+        -t) target=$2 ;;
+        *)  ssh_args+=("$1" "$2") ;;
+      esac
+      shift 2 ;;
+    -*) die "unknown option $1 (see --help)" ;;
+    *) break ;;
+  esac
+done
+(($# == 1)) || die "give exactly one destination, after the options (see --help)"
+dest=$1
+((${#keys[@]})) || die "say which key to remove with -i"
+# The path goes into the remote command line, so keep it to characters no
+# shell treats specially.
+[[ $target =~ ^[A-Za-z0-9._/-]+$ ]] || die "-t: letters, digits and ._/- only"
+
+# --- the keys -----------------------------------------------------------
+blobs=() fps=()
+for k in "${keys[@]}"; do
+  pub=""
+  for c in "$k" "$k.pub" "${k%.tpm}.pub"; do
+    [[ $c == *.pub && -f $c ]] && { pub=$c; break; }
+  done
+  [[ -n $pub ]] || die "no public key for $k (looked for $k.pub)"
+  # The field after the first one that names a key type; skips any options.
+  found=$(awk '/^[[:space:]]*(#|$)/{next}
+               { for (i = 1; i < NF; i++)
+                   if ($i ~ /^(ssh-|ecdsa-|sk-)/) { print $(i+1); break } }' "$pub")
+  [[ -n $found ]] || die "$pub holds no public key"
+  while read -r b; do blobs+=("$b"); done <<<"$found"
+  while read -r _ fp _; do fps+=("$fp"); done < <(ssh-keygen -lf "$pub")
+done
+
+# --- the remote half: POSIX sh, read from stdin --------------------------
+# Output lines: HIT <line> / MANAGED <file>: <line> / KEYS <n> / NOFILE /
+# REMOVED <n> LEFT <n> / ERR <why>.
+# shellcheck disable=SC2016  # expanded on the remote side
+remote_script='
+set -eu
+mode=$1 rel=$2; shift 2
+case $rel in /*) f=$rel ;; *) f=$HOME/$rel ;; esac
+pick() {  # pick hit|keep FILE: the lines that hold one of the blobs, or the rest
+  awk -v m="$1" -v blobs="$BLOBS" "
+    BEGIN { n = split(blobs, b, \" \"); for (i = 1; i <= n; i++) want[b[i]] = 1 }
+    { hit = 0; for (i = 1; i <= NF; i++) if (\$i in want) { hit = 1; break } }
+    (m == \"hit\" && hit) || (m == \"keep\" && !hit)" "$2"
+}
+nkeys() { grep -c -v -E "^[[:space:]]*(#|\$)" "$1" || true; }
+BLOBS="$*"
+case $mode in
+list)
+  sys=/etc/ssh/authorized_keys.d/$(id -un)
+  if [ -r "$sys" ]; then pick hit "$sys" | sed "s|^|MANAGED $sys: |"; fi
+  if [ -f "$f" ]; then
+    if [ -L "$f" ] || [ ! -w "$f" ]; then
+      pick hit "$f" | sed "s|^|MANAGED $f: |"
+    else
+      pick hit "$f" | sed "s/^/HIT /"
+    fi
+    echo "KEYS $(nkeys "$f")"
+  else
+    echo NOFILE
+  fi ;;
+remove)
+  [ -f "$f" ] || { echo "ERR no $f"; exit 3; }
+  if [ -L "$f" ] || [ ! -w "$f" ]; then echo "ERR $f is a symlink or read-only"; exit 3; fi
+  removed=$(pick hit "$f" | wc -l | tr -d " ")
+  [ "$removed" -gt 0 ] || { echo "REMOVED 0 LEFT $(nkeys "$f")"; exit 0; }
+  tmp=$f.ssh-remove-id.$$
+  cp -p "$f" "$tmp"              # the mode and owner of the original
+  pick keep "$f" > "$tmp"
+  left=$(nkeys "$tmp")
+  if [ "$left" -eq 0 ]; then rm -f "$tmp"; echo "ERR that would leave $f with no keys"; exit 4; fi
+  cp -p "$f" "$f.before-ssh-remove-id"
+  mv -f "$tmp" "$f"
+  echo "REMOVED $removed LEFT $left" ;;
+esac
+'
+
+# ${a[@]+...}: an empty array is "unbound" to bash 3.2 (macOS) under set -u.
+ssh_cmd=(ssh -T -o ControlMaster=no -o ControlPath=none -o ClearAllForwardings=yes ${ssh_args[@]+"${ssh_args[@]}"})
+remote() {  # remote MODE [extra ssh options]
+  local mode=$1; shift
+  "${ssh_cmd[@]}" "$@" "$dest" "sh -s -- $mode $target ${blobs[*]}" <<<"$remote_script"
+}
+show() {  # shorten every blob so a line fits on screen
+  local line=$1 b
+  for b in "${blobs[@]}"; do line=${line//"$b"/"${b:0:16}…"}; done
+  printf '  %s\n' "$line"
+}
+logdir=$(mktemp -d); trap 'rm -rf "$logdir"' EXIT
+login_failed() {
+  echo "ssh-remove-id: logging in to $dest failed:" >&2
+  grep -v '^debug' "$1" | tail -5 >&2
+  exit 1
+}
+
+# --- 1. list --------------------------------------------------------------
+out=$(remote list -v -E "$logdir/1.log") || login_failed "$logdir/1.log"
+hits=() managed=()
+while IFS= read -r l; do
+  case $l in
+    "HIT "*)     hits+=("${l#HIT }") ;;
+    "MANAGED "*) managed+=("${l#MANAGED }") ;;
+  esac
+done <<<"$out"
+
+if ((${#managed[@]})); then
+  echo "Managed by the system or home-manager configuration, not edited here:"
+  for l in "${managed[@]}"; do show "$l"; done
+fi
+if [[ $out == *NOFILE* ]]; then echo "$dest has no ~/$target"; exit 0; fi
+if ((${#hits[@]} == 0)); then
+  if ((${#managed[@]})); then echo "Nothing this script may edit."
+  else echo "Not in ~/$target on $dest; nothing to do."; fi
+  exit 0
+fi
+echo "In ~/$target on $dest:"
+for l in "${hits[@]}"; do show "$l"; done
+
+used=$(grep 'Server accepts key:' "$logdir/1.log" | tail -1 | grep -o 'SHA256:[A-Za-z0-9+/=]*' || true)
+for fp in "${fps[@]}"; do
+  if [[ $fp == "$used" ]] && ((!force)); then
+    die "this login used $used, one of the keys being removed, so nothing shows another key still gets in. Log in once with the key you are keeping (ssh -v shows which key the server accepts), or pass -f."
+  fi
+done
+if ((dry)); then echo "(dry run: nothing removed)"; exit 0; fi
+
+# --- 2. remove --------------------------------------------------------------
+if ! out=$(remote remove -E "$logdir/2.log"); then
+  [[ $out == *"ERR "* ]] && die "not removed: ${out#*ERR }"
+  login_failed "$logdir/2.log"
+fi
+[[ $out =~ REMOVED\ ([0-9]+)\ LEFT\ ([0-9]+) ]] || die "unexpected answer: $out"
+removed=${BASH_REMATCH[1]} left=${BASH_REMATCH[2]}
+
+# --- 3. check, on a fresh login -------------------------------------------
+if ! out=$(remote list -E "$logdir/3.log"); then
+  echo "ssh-remove-id: the key is removed, but a fresh login to $dest now FAILS." >&2
+  echo "The previous file is ~/$target.before-ssh-remove-id on $dest; restore it from a session that is still open, or the console." >&2
+  login_failed "$logdir/3.log"
+fi
+[[ $out != *"HIT "* ]] || die "the key is still in ~/$target on $dest after removing it"
+echo "Removed $removed line(s); $left key(s) remain. A fresh login still works."
+echo "The previous file is kept on $dest as ~/$target.before-ssh-remove-id."

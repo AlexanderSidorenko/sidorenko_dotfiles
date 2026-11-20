@@ -43,7 +43,7 @@ nvim/               — Neovim config (LazyVim-based, Lua)
 ranger/             — ranger file manager config
 claude/             — Claude Code config (settings.json, CLAUDE.md, skills/; symlinked into ~/.claude)
 bin/                — custom scripts (clip, mem, ram-health, ssh-host-setup.sh,
-                      neovide, tmux-snapshot, tmux-restore,
+                      ssh-remove-id, neovide, tmux-snapshot, tmux-restore,
                       sweep-branches, audit-repos, tig-diff, and the PR review helpers:
                       pr-help, pr-prep, pr-draft, pr-diff, pr-threads)
 bin/lib/            — sourced helpers, not executables (meminfo.sh)
@@ -222,6 +222,7 @@ zsh -n shrc             # syntax check (zsh parser)
 shellcheck shrc         # lint
 bash -n install.sh && shellcheck install.sh
 bash -n bin/ssh-host-setup.sh && shellcheck bin/ssh-host-setup.sh
+bash -n bin/ssh-remove-id && shellcheck bin/ssh-remove-id
 ```
 
 Scripts that source something from `bin/lib/` need `shellcheck -x` so it follows
