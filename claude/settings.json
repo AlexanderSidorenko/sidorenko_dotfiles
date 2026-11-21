@@ -6,6 +6,10 @@
   "skipDangerousModePermissionPrompt": true,
   "agentPushNotifEnabled": true,
   "theme": "dark",
+  "voice": {
+    "enabled": true,
+    "mode": "tap"
+  },
   "cleanupPeriodDays": 36500,
   "modelSettings": {
     "claude-opus-5-5": {

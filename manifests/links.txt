@@ -76,6 +76,15 @@ link            gitpane/config.toml     .config/gitpane/config.toml
 # that is the intended cost of not globbing a directory the harness shares.
 link            claude/CLAUDE.md        .claude/CLAUDE.md
 link            claude/settings.json    .claude/settings.json
+# Voice push-to-talk is Ctrl+L, not Space. It takes Ctrl+L from
+# chat:clearInput, which then has no key. Tried in Claude Code 2.1.330 and
+# rejected: Ctrl+J (a line feed; it inserts a newline before any binding sees
+# it), Ctrl+K (the input's own kill-to-end-of-line runs first), and Alt+;
+# ("meta+;", "alt+;" and "meta+semicolon" load with no warning but never
+# fire). Alt+M works too. Most other Alt keys are tmux.conf's root table
+# (M-h/j/k/l, M-u/i/n/o/p/s/y, M-digits), so Alt+K, the docs' own example,
+# would never reach Claude inside tmux; Ctrl+Space is the tmux prefix.
+link            claude/keybindings.json .claude/keybindings.json
 link-children   claude/skills           .claude/skills
 
 # --- Firefox ---------------------------------------------------------------
