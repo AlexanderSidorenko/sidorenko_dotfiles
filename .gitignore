@@ -5,11 +5,18 @@ nvim/lazyvim.json
 # Claude Code's per-project LOCAL settings tier. Written by the harness
 # whenever a permission is granted while working in this checkout, and
 # machine-specific by design (its sibling, claude/settings.json, is the shared
-# tier and IS tracked).
-#
-# Note the asymmetry with manifests/links.txt, which refuses to gitignore
-# anything under claude/skills/: that path is OURS, so stray state appearing
-# there means a link row regressed and must stay loud. This path belongs to the
-# harness and is expected to exist on every machine, so ignoring it hides
-# nothing.
+# tier and IS tracked). It belongs to the harness and exists on every machine,
+# so ignoring it hides nothing.
 .claude/settings.local.json
+
+# Claude Code's cache of the skills enabled on the claude.ai account, and the
+# folder it moves them to once syncClaudeAiSkills is turned off. Both live
+# under ~/.claude/skills, which links.txt makes a real directory holding one
+# link per tracked skill, so on a correctly linked machine they never appear
+# here. They do appear when ~/.claude/skills is still a directory symlink into
+# this checkout, and then one `git add -A` publishes the whole cache.
+#
+# Ignoring them takes that regression out of `git status`;
+# manifests/verify-applied.sh still reports it, as "is a directory SYMLINK".
+/claude/skills/synced/
+/claude/skills/.trash/

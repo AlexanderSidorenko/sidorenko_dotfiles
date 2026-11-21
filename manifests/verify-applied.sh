@@ -225,8 +225,8 @@ fi
 # actually caught ~/.claude/skills leaking 4.6 MB of Claude Code's skill cache
 # into the checkout. The two checks are complementary, not redundant.
 #
-# Deliberately NOT solved with a .gitignore: hiding stray state would make a
-# regression silent, which is the opposite of what is wanted.
+# .gitignore keeps that cache from being committed, which also keeps the
+# regression out of `git status`, so this check is what reports it.
 if ! skipped_cat links; then
   ancestors_ok=1
   while IFS=$'\t' read -r kind _src dest _tags; do
