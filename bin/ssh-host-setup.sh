@@ -478,10 +478,15 @@ for i in "${!new_idfiles[@]}"; do
   f="${new_idfiles[$i]}"
   agent=none
   if [[ "${new_kinds[$i]}" == tpm ]]; then agent="$(tpm_socket)"; fi
-  green "Logging in to ${friendly_name} with ${f} only$([[ ${new_kinds[$i]} == yubikey ]] && echo ': touch the token, then enter the PIN')."
+  green "Logging in to ${friendly_name} with ${f} only$([[ ${new_kinds[$i]} == yubikey ]] && echo ": plug in YubiKey ${f##*_}, enter its PIN, then touch it")."
   out="$(mktemp)"
   set +e
-  ssh -n "${verify_opts[@]}" -o "IdentityAgent=${agent:-none}" -o "IdentityFile=${f}" "${friendly_name}" true 2>&1 | tee "${out}"
+  # Empty SSH_ASKPASS: with stderr going into tee rather than to the terminal,
+  # ssh would show its "Confirm user presence" note through the desktop's
+  # askpass. Seahorse's draws that as a passphrase box, and its keyboard grab
+  # makes GNOME ask to allow or deny it, all alongside the real PIN prompt,
+  # which ssh asks on the terminal. The line above says to touch instead.
+  SSH_ASKPASS='' ssh -n "${verify_opts[@]}" -o "IdentityAgent=${agent:-none}" -o "IdentityFile=${f}" "${friendly_name}" true 2>&1 | tee "${out}"
   rc="${PIPESTATUS[0]}"
   set -e
   # Git forges authenticate the key, then refuse the command with a non-zero
