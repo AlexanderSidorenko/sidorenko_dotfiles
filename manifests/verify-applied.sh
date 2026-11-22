@@ -453,8 +453,24 @@ if ! skipped_cat git; then
 fi
 
 # ---------------------------------------------------------------------------
-# ssh — Include present AND last
+# ssh — Include present, last, AND in effect
 # ---------------------------------------------------------------------------
+# What every option the included file sets resolves to, as `ssh -G` sees it,
+# for a host name no config has a block for. Prints the options whose value
+# differs from what the included file alone gives; prints nothing when all
+# arrived. Exit 2 when the included file sets nothing measurable.
+ssh_defaults_missing() {
+  local cfg="$1" included="$2" probe="verify-applied.invalid"
+  local base from_include effective
+  base="$(ssh -G -F /dev/null "$probe" 2>/dev/null | LC_ALL=C sort)"
+  from_include="$(ssh -G -F "$included" "$probe" 2>/dev/null | LC_ALL=C sort \
+    | LC_ALL=C comm -23 - <(printf '%s\n' "$base"))"
+  [[ -n $from_include ]] || return 2
+  effective="$(ssh -G -F "$cfg" "$probe" 2>/dev/null | LC_ALL=C sort)"
+  LC_ALL=C comm -23 <(printf '%s\n' "$from_include") <(printf '%s\n' "$effective") \
+    | cut -d' ' -f1 | paste -sd' ' -
+}
+
 if ! skipped_cat ssh; then
   while IFS=$'\t' read -r _kind src dest _tags; do
     cfg="${TARGET_HOME}/${dest}"
@@ -472,8 +488,25 @@ if ! skipped_cat ssh; then
     trailing="$(awk -v n="$last_include_line" 'NR>n && NF && $0 !~ /^[[:space:]]*#/ {print; exit}' "$cfg")"
     if [[ -n $trailing ]]; then
       emit FAIL ssh "${dest}" "Include is not last (followed by: ${trailing})"
+      continue
+    fi
+    # Last is not enough either. An Include belongs to the Host block it sits
+    # in, and comments and blank lines do not end one: with no `Match all`
+    # before it, ssh reads the file and applies it only to the hosts of the
+    # block above. Both checks above pass on such a file, so only the effect
+    # settles it.
+    if ! command -v ssh >/dev/null 2>&1; then
+      emit SKIP ssh "${dest}" "Include present and last; no ssh to check it takes effect"
+      continue
+    fi
+    rc=0
+    missing="$(ssh_defaults_missing "$cfg" "${DOTDIR}/${src}")" || rc=$?
+    if (( rc == 2 )); then
+      emit FAIL ssh "${dest}" "ssh -G found no options set by ${DOTDIR}/${src}"
+    elif [[ -n $missing ]]; then
+      emit FAIL ssh "${dest}" "Include does not reach a host with no block of its own (missing: ${missing}); is it under \`Match all\`?"
     else
-      emit PASS ssh "${dest}" "Include present and last"
+      emit PASS ssh "${dest}" "Include present, last, and in effect for every host"
     fi
   done < <(manifest_links "${HERE}/links.txt" "${GATES[@]}" | awk -F'\t' '$1=="ssh-include"')
 fi

@@ -2,7 +2,10 @@
 # Included from ~/.ssh/config via `Include ~/.sidorenko_dotfiles/ssh_config`.
 # Per-host overrides in ~/.ssh/config still take precedence — first match wins,
 # so any `Host <name>` block ABOVE the Include line in ~/.ssh/config wins over
-# these defaults.
+# these defaults. Put `Match all` on the line before the Include, as
+# manifests/apply-links.sh does: an Include belongs to the Host block it sits
+# in, so without that line these defaults reach only the hosts of the block
+# above it.
 
 Host *
     # Keep idle connections alive (NAT/firewall friendly)

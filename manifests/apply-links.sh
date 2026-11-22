@@ -223,6 +223,13 @@ apply_firefox_user_js() {
 # the top makes those defaults beat every per-host block below it, silently.
 # The marker text matches what install.sh has always written, so machines that
 # already ran the old installer are recognised and not appended to twice.
+#
+# Last is not enough: the block opens with `Match all`. An Include belongs to
+# the Host block it sits in, and blank lines and comments do not end one, so
+# without that line the per-host block just above (where ssh-host-setup.sh
+# puts every new host) owns the Include. OpenSSH then reads the file and
+# applies it to that block's hosts alone; every other host silently gets none
+# of the defaults. Any block that is not exactly the one below is rewritten.
 apply_ssh_include() {
   local abs_src="$1" dest="$2" rel_src="$3"
   local open_marker='# >>> sidorenko_dotfiles >>>'
@@ -243,21 +250,38 @@ apply_ssh_include() {
     dot_display="~/${DOTDIR#"$TARGET_HOME"/}"
   fi
   local include_line="Include ${dot_display}/${rel_src}"
+  local block
+  block="$(printf '%s\n' \
+    "$open_marker" \
+    '# "Host *" defaults — keep this block LAST so per-host blocks above win.' \
+    '# "Match all" ends the Host block above; without it, that block owns the Include.' \
+    'Match all' \
+    "$include_line" \
+    "$close_marker")"
 
   if [[ -f $dest ]] && grep -qF "$include_line" "$dest"; then
-    # Present. Is it last? Anything non-blank after the close marker means a
-    # later Host block would be overridden by the Host * defaults.
     if ! grep -qF "$open_marker" "$dest"; then
       log "ok       ${dest#"$TARGET_HOME"/} (hand-managed Include; left alone)"
       OK=$((OK + 1))
       return
     fi
-    if awk -v m="$close_marker" 'seen && NF {bad=1; exit} $0==m {seen=1} END{exit bad}' "$dest"; then
+    # Present. Is it this block, and is it last? Anything non-blank after the
+    # close marker means a later Host block would be overridden by the Host *
+    # defaults.
+    local current
+    current="$(awk -v mo="$open_marker" -v mc="$close_marker" '
+      $0 == mo {inblock=1}
+      inblock  {print}
+      $0 == mc {exit}' "$dest")"
+    if [[ $current != "$block" ]]; then
+      log "Include block in ${dest} is not the current one — rewriting it"
+    elif awk -v m="$close_marker" 'seen && NF {bad=1; exit} $0==m {seen=1} END{exit bad}' "$dest"; then
       log "ok       ${dest#"$TARGET_HOME"/} (Include present and last)"
       OK=$((OK + 1))
       return
+    else
+      log "Include block is not last in ${dest} — moving it to the bottom"
     fi
-    log "Include block is not last in ${dest} — moving it to the bottom"
   fi
 
   if (( DRY_RUN )); then
@@ -284,10 +308,7 @@ apply_ssh_include() {
   tmp="$(mktemp "${dest}.XXXXXX")" || die "could not create a temp file beside ${dest}"
   {
     [[ -n $body ]] && printf '%s\n\n' "$body"
-    printf '%s\n' "$open_marker"
-    printf '# "Host *" defaults — keep this block LAST so per-host blocks above win.\n'
-    printf '%s\n' "$include_line"
-    printf '%s\n' "$close_marker"
+    printf '%s\n' "$block"
   } >"$tmp"
   chmod 600 "$tmp"
   mv -f -- "$tmp" "$dest" || die "could not update ${dest}"
