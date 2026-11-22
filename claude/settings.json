@@ -8,7 +8,7 @@
   "theme": "dark",
   "voice": {
     "enabled": true,
-    "mode": "tap"
+    "mode": "hold"
   },
   "cleanupPeriodDays": 36500,
   "modelSettings": {
