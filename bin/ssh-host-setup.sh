@@ -13,14 +13,16 @@
 #   yubikey  A resident ed25519-sk credential with verify-required, made inside
 #            one YubiKey: a touch plus the FIDO2 PIN on every use. Run once per
 #            token. The file in ~/.ssh is only a handle; `ssh-keygen -K`
-#            recreates it on any machine from the token. Installed with the
-#            verify-required option, so the server demands the PIN as well.
+#            recreates it on any machine from the token, under OpenSSH's own
+#            name (id_ed25519_sk_rk_<name>-<label>), to be renamed to the one
+#            below. Installed with the verify-required option, so the server
+#            demands the PIN as well.
 #   file     A plain key file on disk, as this script always made. For
 #            machines with no TPM.
 #
 # FILES, in ~/.ssh (<this> is this machine's hostname, <name> the destination):
 #   tpm      id_ecdsa_tpm_<this>_<name>.tpm and .pub
-#   yubikey  id_ed25519_sk_<name>_<label> and .pub   (application ssh:<name>-<label>)
+#   yubikey  id_ed25519_yk_<name>_<label> and .pub   (application ssh:<name>-<label>)
 #   file     id_<alg>_<this>_<name> and .pub
 #
 # ~/.ssh/config gets one `Host <name>` block per destination, written above the
@@ -235,7 +237,7 @@ yubikey)
 
     label="$(ask "Label for this YubiKey (e.g. main, backup)")"
     [[ "${label}" =~ ^[a-z0-9-]+$ ]] || die "Label: lowercase letters, digits and dashes."
-    key_path="${ssh_dir}/id_ed25519_sk_${friendly_safe}_${label}"
+    key_path="${ssh_dir}/id_ed25519_yk_${friendly_safe}_${label}"
     application="ssh:${friendly_safe}-${label}"
 
     generate=1
