@@ -43,6 +43,11 @@
 # -F <dir>/config. It exists for testing; a real run leaves it unset.
 set -euo pipefail
 
+# Key names, the ~/.ssh/config edits and the YubiKey PIN check, shared with
+# ssh-restore-yk.
+# shellcheck source-path=SCRIPTDIR
+source "$(dirname "${BASH_SOURCE[0]}")/lib/ssh-keys.sh"
+
 GREEN="$(printf '\033[0;32m')"
 BLUE="$(printf '\033[0;34m')"
 RED="$(printf '\033[0;31m')"
@@ -81,8 +86,6 @@ ask() {
   printf '%s' "${answer:-$default}"
 }
 
-safe_name() { printf '%s' "$1" | tr '[:upper:] ' '[:lower:]_' | tr -cd '[:alnum:]_-'; }
-
 ssh_dir="${SSH_HOST_SETUP_DIR:-$HOME/.ssh}"
 config_path="${ssh_dir}/config"
 ssh_cmd=(ssh)
@@ -109,14 +112,7 @@ mkdir -p "${ssh_dir}"
 chmod 700 "${ssh_dir}"
 
 # The `Host <name>` block for exactly this name, if the config has one.
-print_block() {
-  [[ -f "${config_path}" ]] || return 0
-  awk -v h="${friendly_name}" '
-    inb && (tolower($1) == "host" || tolower($1) == "match" || /^# >>> sidorenko_dotfiles/) { exit }
-    !inb && tolower($1) == "host" && NF == 2 && $2 == h { inb = 1 }
-    inb { print }
-  ' "${config_path}"
-}
+print_block() { ssh_config_block "${config_path}" "${friendly_name}"; }
 
 block_existed=0
 if [[ -n "$(print_block)" ]]; then
@@ -228,16 +224,21 @@ yubikey)
         die "Plug in exactly one YubiKey (found ${#serials[@]}), so the credential lands on the token you mean."
       fi
       serial="${serials[0]}"
-      if ykman --device "${serial}" fido info 2>/dev/null | grep -qi 'PIN is not set'; then
-        die "YubiKey ${serial} has no FIDO2 PIN, and verify-required needs one: ykman fido access change-pin"
-      fi
+      fido_info="$(ykman --device "${serial}" fido info 2>/dev/null || true)"
+      case "$(yk_pin_state "${fido_info}")" in
+      notset) die "YubiKey ${serial} has no FIDO2 PIN, and verify-required needs one: ykman fido access change-pin" ;;
+      blocked) die "YubiKey ${serial}'s FIDO2 PIN is blocked. Only a FIDO reset (ykman fido reset) brings it back, and that erases every credential on it." ;;
+      temporary) die "YubiKey ${serial}'s PIN is temporarily blocked after three wrong tries: unplug it, plug it back in, and run this again." ;;
+      set) blue "YubiKey ${serial}: $(yk_pin_tries "${fido_info}") FIDO2 PIN tries left." ;;
+      *) yellow "ykman did not say whether YubiKey ${serial} has a FIDO2 PIN, so that goes unchecked." ;;
+      esac
     else
       yellow "ykman is not installed, so the token count and its FIDO2 PIN go unchecked; ssh-keygen uses whichever token answers."
     fi
 
     label="$(ask "Label for this YubiKey (e.g. main, backup)")"
     [[ "${label}" =~ ^[a-z0-9-]+$ ]] || die "Label: lowercase letters, digits and dashes."
-    key_path="${ssh_dir}/id_ed25519_yk_${friendly_safe}_${label}"
+    key_path="${ssh_dir}/$(yk_handle "${friendly_safe}" "${label}")"
     application="ssh:${friendly_safe}-${label}"
 
     generate=1
@@ -301,71 +302,10 @@ tmp_config="$(mktemp)"
 trap 'rm -f "${tmp_config}"' EXIT
 
 if ((block_existed)); then
-  # Two passes over the config: the first finds the block and what is in it,
-  # the second prints it back with the new lines. Keys that are not on a token
-  # go in front of the first YubiKey handle, so ssh reaches for them before
-  # asking for a touch.
-  awk -v h="${friendly_name}" -v ids="$(printf '%s\n' "${new_idfiles[@]}")" '
-    BEGIN { n = split(ids, idl, "\n"); home = ENVIRON["HOME"] }
-    function norm(p) { return substr(p, 1, 2) == "~/" ? home substr(p, 2) : p }
-    function is_sk(p) { return p ~ /id_(ed25519|ecdsa)_sk/ }
-    NR == FNR {
-      if (inb && (tolower($1) == "host" || tolower($1) == "match" || /^# >>> sidorenko_dotfiles/)) { inb = 0; done = 1 }
-      if (!inb && !done && tolower($1) == "host" && NF == 2 && $2 == h) { inb = 1; last = FNR; next }
-      if (inb) {
-        if ($0 ~ /[^[:space:]]/) last = FNR
-        if (indent == "" && match($0, /^[[:space:]]+[^[:space:]#]/)) {
-          match($0, /^[[:space:]]+/); indent = substr($0, 1, RLENGTH)
-        }
-        k = tolower($1)
-        if (k == "identitiesonly") hasonly = 1
-        if (k == "identityfile") {
-          have[norm($2)] = 1
-          if (!firstid) firstid = FNR
-          if (is_sk($2) && !firstsk) firstsk = FNR
-        }
-      }
-      next
-    }
-    FNR == 1 {
-      if (indent == "") indent = "  "
-      for (i = 1; i <= n; i++) {
-        p = idl[i]
-        if (p == "" || (norm(p) in have)) continue
-        if (!is_sk(p) && firstsk) before[firstsk] = before[firstsk] indent "IdentityFile " p "\n"
-        else after[last] = after[last] indent "IdentityFile " p "\n"
-      }
-      if (!hasonly) {
-        if (firstid) before[firstid] = indent "IdentitiesOnly yes\n" before[firstid]
-        else after[last] = indent "IdentitiesOnly yes\n" after[last]
-      }
-    }
-    {
-      if (FNR in before) printf "%s", before[FNR]
-      print
-      if (FNR in after) printf "%s", after[FNR]
-    }
-  ' "${config_path}" "${config_path}" >"${tmp_config}"
+  ssh_config_add_ids "${config_path}" "${friendly_name}" "${new_idfiles[@]}" >"${tmp_config}"
 else
-  first_address="${address_line%% *}"
-  block="Host ${friendly_name}
-  HostName ${first_address}
-  User ${username}
-  IdentitiesOnly yes"
-  for f in "${new_idfiles[@]}"; do
-    block+="
-  IdentityFile ${f}"
-  done
-  # Above the dotfiles Include, so this block's settings win over `Host *`.
-  if [[ -f "${config_path}" ]]; then
-    awk -v blk="${block}" '
-      !done && /^# >>> sidorenko_dotfiles >>>/ { printf "%s\n\n", blk; done = 1 }
-      { print }
-      END { if (!done) printf "\n%s\n", blk }
-    ' "${config_path}" >"${tmp_config}"
-  else
-    printf '%s\n' "${block}" >"${tmp_config}"
-  fi
+  ssh_config_new_block "${config_path}" "${friendly_name}" "${address_line%% *}" "${username}" \
+    "${new_idfiles[@]}" >"${tmp_config}"
 fi
 
 green "Proposed ssh config diff:"

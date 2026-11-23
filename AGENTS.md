@@ -46,7 +46,7 @@ bin/                — custom scripts (clip, mem, ram-health, ssh-host-setup.sh
                       ssh-remove-id, neovide, tmux-snapshot, tmux-restore,
                       sweep-branches, audit-repos, tig-diff, and the PR review helpers:
                       pr-help, pr-prep, pr-draft, pr-diff, pr-threads)
-bin/lib/            — sourced helpers, not executables (meminfo.sh)
+bin/lib/            — sourced helpers, not executables (meminfo.sh, ssh-keys.sh)
 githooks/           — this repo's own git hooks (commit-msg enforces [job] prefix)
 ```
 
@@ -221,7 +221,6 @@ bash -n shrc            # syntax check (bash parser)
 zsh -n shrc             # syntax check (zsh parser)
 shellcheck shrc         # lint
 bash -n install.sh && shellcheck install.sh
-bash -n bin/ssh-host-setup.sh && shellcheck bin/ssh-host-setup.sh
 bash -n bin/ssh-remove-id && shellcheck bin/ssh-remove-id
 ```
 
@@ -233,6 +232,8 @@ contribution:
 bash -n bin/mem && shellcheck -x bin/mem
 bash -n bin/ram-health && shellcheck -x bin/ram-health
 shellcheck bin/lib/meminfo.sh    # has a `shell=bash` directive, no shebang
+bash -n bin/ssh-host-setup.sh && shellcheck -x bin/ssh-host-setup.sh
+shellcheck bin/lib/ssh-keys.sh   # likewise
 ```
 
 ## Important notes
