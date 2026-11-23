@@ -24,9 +24,10 @@
 #   ssh_config_add_ids CONFIG HOST FILE...
 #                                      the config with every FILE the HOST block
 #                                      lacks added to it, and IdentitiesOnly yes
-#   ssh_config_new_block CONFIG HOST ADDRESS USER FILE...
+#   ssh_config_new_block CONFIG HOST ADDRESS USER PORT FILE...
 #                                      the config with a new block above the
-#                                      dotfiles Include, so it wins over Host *
+#                                      dotfiles Include, so it wins over Host *.
+#                                      PORT empty or 22 writes no Port line
 # A block ends at the next Host or Match line, or at the dotfiles Include.
 # Handles of keys on a token (id_*_sk_*, id_*_yk_*) go after the block's other
 # keys, so ssh tries those before asking for a touch.
@@ -122,11 +123,16 @@ ssh_config_add_ids() {
 }
 
 ssh_config_new_block() {
-  local config=$1 host=$2 address=$3 user=$4 block f
-  shift 4
+  local config=$1 host=$2 address=$3 user=$4 port=$5 block f
+  shift 5
   block="Host ${host}
   HostName ${address}
-  User ${user}
+  User ${user}"
+  if [[ -n ${port} && ${port} != 22 ]]; then
+    block+="
+  Port ${port}"
+  fi
+  block+="
   IdentitiesOnly yes"
   for f in "$@"; do
     block+="

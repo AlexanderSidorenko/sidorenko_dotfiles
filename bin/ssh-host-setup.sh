@@ -304,7 +304,7 @@ trap 'rm -f "${tmp_config}"' EXIT
 if ((block_existed)); then
   ssh_config_add_ids "${config_path}" "${friendly_name}" "${new_idfiles[@]}" >"${tmp_config}"
 else
-  ssh_config_new_block "${config_path}" "${friendly_name}" "${address_line%% *}" "${username}" \
+  ssh_config_new_block "${config_path}" "${friendly_name}" "${address_line%% *}" "${username}" "" \
     "${new_idfiles[@]}" >"${tmp_config}"
 fi
 

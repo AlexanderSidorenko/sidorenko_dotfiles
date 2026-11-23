@@ -37,9 +37,10 @@
 #   named      an IdentityFile line already names it: nothing to do
 #   added      a Host block for <name> exists (`Host git.jfj.sh` counts for
 #              gitjfjsh): an IdentityFile line goes into it
-#   new block  no Host block: it asks for the address and user and writes one
-#              above the dotfiles Include. An empty address leaves it out, for
-#              a destination this machine does not reach.
+#   new block  no Host block: it asks for the address, user and port and writes
+#              one above the dotfiles Include. The port defaults to 22, which
+#              writes no Port line. An empty address leaves it out, for a
+#              destination this machine does not reach.
 # It shows the whole diff and asks once before writing, and writes through a
 # config that is a link (it_infra's per-host ssh_config), so the change shows
 # up there as a diff to commit.
@@ -249,9 +250,16 @@ elif ((${#cfg_files[@]})); then
         continue
       fi
       user=$(ask "User on ${name}" "${default_user}")
-      ssh_config_new_block "${work}" "${name}" "${address}" "${user}" "${file}" >"${work}.next"
+      port=$(ask "Port on ${name}" 22)
+      until [[ ${port} =~ ^[0-9]{1,5}$ ]] && ((10#${port} >= 1 && 10#${port} <= 65535)); do
+        port=$(ask "A port is a number from 1 to 65535. Port on ${name}" 22)
+      done
+      port=$((10#${port}))
+      ssh_config_new_block "${work}" "${name}" "${address}" "${user}" "${port}" "${file}" >"${work}.next"
       mv -- "${work}.next" "${work}"
-      crow "new block" "Host ${name} (${user}@${address}) with ${file##*/}"
+      where="${user}@${address}"
+      ((port == 22)) || where+=":${port}"
+      crow "new block" "Host ${name} (${where}) with ${file##*/}"
     fi
   done
   printf '\n%s:\n%s' "${config}" "${creport}"
