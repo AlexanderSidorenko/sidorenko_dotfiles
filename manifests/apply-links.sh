@@ -24,9 +24,14 @@
 # is the one injected file home-manager must NOT own. That file holds this
 # machine's hand-written `Host forgejo` block naming the deploy key this repo's
 # own git remote uses; enabling programs.ssh would replace it with a store
-# symlink and break `git fetch` on the host that manages the host. So nothing
-# declarative owns ~/.ssh/config, appending works on both platforms, and the
-# logic lives here once instead of twice.
+# symlink and break `git fetch` on the host that manages the host. So
+# programs.ssh never generates ~/.ssh/config, appending works on both
+# platforms, and the logic lives here once instead of twice.
+#
+# A machine may still keep ~/.ssh/config as a LINK to a hand-edited copy
+# tracked elsewhere, so that copy is the live config. This script writes
+# through such a link rather than renaming over it: a rename would put a plain
+# file in its place, and the tracked copy would silently stop being live.
 #
 # This script never deletes a link it did not create and never replaces a real
 # file without being told to — see --on-conflict.
@@ -311,7 +316,13 @@ apply_ssh_include() {
     printf '%s\n' "$block"
   } >"$tmp"
   chmod 600 "$tmp"
-  mv -f -- "$tmp" "$dest" || die "could not update ${dest}"
+  # Write through a link (see the header); replace a plain file atomically.
+  if [[ -L $dest ]]; then
+    cat -- "$tmp" >"$dest" || { rm -f -- "$tmp"; die "could not update ${dest}"; }
+    rm -f -- "$tmp"
+  else
+    mv -f -- "$tmp" "$dest" || die "could not update ${dest}"
+  fi
   say "updated  ${dest#"$TARGET_HOME"/} (Include kept last)"
   CHANGED=$((CHANGED + 1))
 }

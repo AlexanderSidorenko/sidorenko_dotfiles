@@ -131,6 +131,46 @@
           }" >>$out
           echo "OK: all names resolved" >>$out
         '';
+
+        # apply-links.sh writes ~/.ssh/config's Include THROUGH a link rather
+        # than renaming over it. A machine may link that file to a tracked
+        # copy; a rename would leave a plain file in its place and the copy
+        # silently detached. A plain file is still rewritten as one.
+        ssh-include-link = pkgs.runCommand "sidorenko-dotfiles-ssh-include-link"
+          {
+            nativeBuildInputs = with pkgs; [
+              bash coreutils gnugrep gnused gawk findutils
+            ];
+          } ''
+          set -euo pipefail
+          dot=$PWD/dot
+          mkdir -p "$dot"
+          cp -r ${./manifests} "$dot/manifests"
+          cp ${./ssh_config} "$dot/ssh_config"
+          printf 'ssh-include ssh_config .ssh/config\n' >links.txt
+
+          run() {
+            bash "$dot/manifests/apply-links.sh" --dotdir "$dot" --home "$1" \
+              --links "$PWD/links.txt" --no-nixos --no-gui --on-conflict skip --quiet
+          }
+          stale() { printf 'Host example\n  HostName example.invalid\n' >"$1"; }
+
+          mkdir -p linked/.ssh tracked
+          stale tracked/ssh_config
+          ln -s "$PWD/tracked/ssh_config" linked/.ssh/config
+          run "$PWD/linked"
+          test -L linked/.ssh/config
+          grep -qx 'Match all' tracked/ssh_config
+          grep -q '^Host example' tracked/ssh_config
+
+          mkdir -p plain/.ssh
+          stale plain/.ssh/config
+          run "$PWD/plain"
+          test ! -L plain/.ssh/config
+          grep -qx 'Match all' plain/.ssh/config
+
+          echo "OK: the ssh Include is written through a link" >$out
+        '';
       }
       # The VM test and the interface contract are Linux-only (nixosTest needs
       # KVM), so they are merged in for those systems rather than claimed for
