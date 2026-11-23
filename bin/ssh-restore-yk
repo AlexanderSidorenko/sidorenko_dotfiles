@@ -1,0 +1,287 @@
+#!/usr/bin/env bash
+# ssh-restore-yk: write a YubiKey's SSH key handles back into ~/.ssh, under the
+# names ssh-host-setup.sh and it_infra's enrollers give them, and name each one
+# in ~/.ssh/config.
+#
+#   ssh-restore-yk [--label LABEL]
+#
+# Plug in one token and run it; it asks for that token's FIDO2 PIN. Then swap
+# in the other token and run it again.
+#
+# After a wipe, nothing but the token and its PIN is needed. A login needs the
+# credential's private key, which never leaves the token, and its public half,
+# which every destination already holds. The file in ~/.ssh is a handle that
+# tells ssh which credential to ask the token for. It is not a secret, and
+# `ssh-keygen -K` re-creates it from the token. This runs that, then gives each
+# handle its name:
+#
+#   on the token    application ssh:<name>-<label>
+#   ssh-keygen -K   id_ed25519_sk_rk_<name>-<label>
+#   restored as     id_ed25519_yk_<name>_<label>, and .pub
+#
+# <label> is what follows the last dash. A token whose label has a dash in it
+# needs --label, which also skips every credential with another label.
+#
+# HANDLES. No file is ever overwritten. Each credential on the token is:
+#   restored   no handle under its name yet: written, the handle 600, .pub 644
+#   in place   the handle under its name is this credential: left as it is,
+#              and a missing handle or .pub beside it is filled in
+#   STALE      the file under its name holds another key: a credential the
+#              token no longer has, or another token enrolled under the same
+#              label. Left as it is, and kept out of the config.
+#   skipped    not ed25519-sk, not ssh:<name>-<label>, or carrying a user id:
+#              not made by the enrollers
+#
+# ~/.ssh/config. Every handle restored or in place ends up named there, the
+# way ssh-host-setup.sh names a new key (the edits are shared, bin/lib/ssh-keys.sh):
+#   named      an IdentityFile line already names it: nothing to do
+#   added      a Host block for <name> exists (`Host git.jfj.sh` counts for
+#              gitjfjsh): an IdentityFile line goes into it
+#   new block  no Host block: it asks for the address and user and writes one
+#              above the dotfiles Include. An empty address leaves it out, for
+#              a destination this machine does not reach.
+# It shows the whole diff and asks once before writing, and writes through a
+# config that is a link (it_infra's per-host ssh_config), so the change shows
+# up there as a diff to commit.
+#
+# It exits 1 when anything is STALE, or when nothing on the token is the
+# enrollers'.
+#
+# PIN tries. ykman, when installed, shows how many are left before you type.
+# A wrong PIN uses one; three wrong in a row need the token unplugged and
+# plugged back in; at none left, only a FIDO reset brings the token back, and
+# that erases every credential on it.
+#
+# Not restored here: known_hosts, accepted again on the first login; TPM keys,
+# which cannot leave their TPM and are made anew with ssh-host-setup.sh.
+set -euo pipefail
+
+# shellcheck source-path=SCRIPTDIR
+source "$(dirname "${BASH_SOURCE[0]}")/lib/ssh-keys.sh"
+
+die() { printf 'ssh-restore-yk: %s\n' "$*" >&2; exit 1; }
+note() { printf 'ssh-restore-yk: %s\n' "$*" >&2; }
+usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; }
+# ask <question> [default]: the prompt goes to stderr, the answer to stdout.
+# No terminal (stdin closed) answers with the default.
+ask() {
+  local answer=""
+  if [[ -n ${2:-} ]]; then printf '%s [%s]: ' "$1" "$2" >&2; else printf '%s: ' "$1" >&2; fi
+  read -r answer || true
+  printf '%s' "${answer:-${2:-}}"
+}
+
+label=""
+while (($#)); do
+  case $1 in
+    -h|--help) usage; exit 0 ;;
+    --label)
+      (($# >= 2)) || die "--label needs a value"
+      label=$2
+      shift 2 ;;
+    *) die "unknown argument $1 (see --help)" ;;
+  esac
+done
+if [[ -n ${label} && ! ${label} =~ ^[a-z0-9-]+$ ]]; then
+  die "--label: lowercase letters, digits and dashes, as the enrollers take"
+fi
+
+ssh_dir="${HOME}/.ssh"
+config="${ssh_dir}/config"
+command -v ssh-keygen >/dev/null 2>&1 || die "ssh-keygen is not installed"
+
+# --- the token ---------------------------------------------------------------
+token="the token"
+if command -v ykman >/dev/null 2>&1; then
+  serials=() # a read loop, not mapfile: macOS's stock bash 3.2 has none
+  while IFS= read -r s; do
+    [[ -n ${s} ]] && serials+=("${s}")
+  done < <(ykman list --serials 2>/dev/null || true)
+  if ((${#serials[@]} != 1)); then
+    die "plug in exactly one YubiKey (found ${#serials[@]}), so the PIN you type goes to the token you mean"
+  fi
+  token="YubiKey ${serials[0]}"
+  fido=$(ykman --device "${serials[0]}" fido info 2>/dev/null || true)
+  case $(yk_pin_state "${fido}") in
+    notset) die "${token} has no FIDO2 PIN, and listing its credentials needs one. The enrollers set a PIN before making any, so it holds none of theirs." ;;
+    blocked) die "${token}'s FIDO2 PIN is blocked. Only a FIDO reset brings it back, and that erases every credential on it: reset it and enrol it again." ;;
+    temporary) die "${token}'s PIN is temporarily blocked after three wrong tries: unplug it, plug it back in, and run this again" ;;
+    set) printf '%s: %s FIDO2 PIN tries left.\n' "${token}" "$(yk_pin_tries "${fido}")" ;;
+    *) note "ykman did not say whether ${token} has a FIDO2 PIN or how many tries are left" ;;
+  esac
+else
+  note "ykman is not installed, so neither the number of tokens plugged in nor the PIN tries left are checked"
+fi
+
+# --- read the handles off it ---------------------------------------------------
+# Into an empty directory beside the destination: ssh-keygen -K writes into the
+# current directory and asks before replacing a file there, and a rename within
+# one directory tree cannot half-happen.
+[[ -d ${ssh_dir} ]] || mkdir -m 700 -- "${ssh_dir}"
+tmp=$(mktemp -d "${ssh_dir}/.ssh-restore-yk.XXXXXX")
+trap 'rm -rf -- "${tmp}"' EXIT
+printf 'Reading the SSH credentials on %s: enter its FIDO2 PIN, and touch it if it blinks.\n' "${token}"
+(cd "${tmp}" && ssh-keygen -q -K -N "") ||
+  die "ssh-keygen could not read the credentials on ${token} (wrong PIN?). Nothing in ${ssh_dir} changed."
+
+# --- name them -----------------------------------------------------------------
+report="" stale=0 ours=0
+cfg_names=() cfg_files=() # handles restored or in place, for the config
+row() { report+="$(printf '  %-9s %s' "$1" "$2")"$'\n'; }
+
+shopt -s nullglob
+for h in "${tmp}"/id_*; do
+  [[ ${h} == *.pub ]] && continue
+  got=${h##*/}
+  if [[ ! -r ${h}.pub ]]; then
+    row skipped "${got}: ssh-keygen wrote no .pub beside it"
+    continue
+  fi
+  type="" blob="" app=""
+  read -r type blob app _ <"${h}.pub" || true # -K puts the application in the comment
+  rest=${app#ssh:}
+
+  if [[ ${type} != sk-ssh-ed25519@openssh.com ]]; then
+    row skipped "${app:-${got}} (${type}): the enrollers make ed25519-sk only"
+    continue
+  fi
+  if [[ ${app} != ssh:?* ]]; then
+    row skipped "${got} (${app:-no application}): no name after ssh:"
+    continue
+  fi
+  # ssh-keygen appends _<user id> to the name of a credential that has one;
+  # the enrollers never set one.
+  if [[ ${got} != "id_ed25519_sk_rk_${rest}" ]]; then
+    row skipped "${app}: has a user id (${got#"id_ed25519_sk_rk_${rest}_"})"
+    continue
+  fi
+  if [[ -n ${label} ]]; then
+    name=${rest%-"${label}"} lab=${label}
+  else
+    name=${rest%-*} lab=${rest##*-}
+  fi
+  if [[ ${name} == "${rest}" || -z ${name} || -z ${lab} ]]; then
+    row skipped "${app}: not ssh:<name>-${label:-<label>}"
+    continue
+  fi
+  # A name the enrollers made is its own safe_name, which also keeps it to one
+  # file in ${ssh_dir}.
+  if [[ $(safe_name "${name}") != "${name}" ]]; then
+    row skipped "${app}: a name the enrollers would not make"
+    continue
+  fi
+  ours=$((ours + 1))
+
+  want=$(yk_handle "${name}" "${lab}")
+  dest="${ssh_dir}/${want}"
+  key="${type} ${blob}"
+  if [[ ! -e ${dest} && ! -e ${dest}.pub ]]; then
+    mv -- "${h}" "${dest}"
+    mv -- "${h}.pub" "${dest}.pub"
+    chmod 600 "${dest}"
+    chmod 644 "${dest}.pub"
+    row restored "${want}  (${app})"
+    cfg_names+=("${name}") cfg_files+=("${dest}")
+    continue
+  fi
+  # Reading the public half out of a handle needs no token. -P '' fails a
+  # passphrase-protected file instead of prompting for it.
+  if [[ -e ${dest} ]]; then
+    have=$(ssh-keygen -y -P '' -f "${dest}" 2>/dev/null | awk '{print $1" "$2; exit}' || true)
+  else
+    have=$(awk '{print $1" "$2; exit}' "${dest}.pub" 2>/dev/null || true)
+  fi
+  if [[ ${have} != "${key}" ]]; then
+    stale=$((stale + 1))
+    row STALE "${want} holds another key than ${app} on ${token}; left as it is"
+    continue
+  fi
+  filled=""
+  if [[ ! -e ${dest} ]]; then
+    mv -- "${h}" "${dest}"
+    chmod 600 "${dest}"
+    filled=" (handle written)"
+  elif [[ ! -e ${dest}.pub ]]; then
+    mv -- "${h}.pub" "${dest}.pub"
+    chmod 644 "${dest}.pub"
+    filled=" (.pub written)"
+  fi
+  row "in place" "${want}  (${app})${filled}"
+  cfg_names+=("${name}") cfg_files+=("${dest}")
+done
+
+if [[ -z ${report} ]]; then
+  die "${token} holds no SSH credentials. Enrol it with ssh-host-setup.sh."
+fi
+printf '\nFrom %s into %s:\n%s' "${token}" "${ssh_dir}" "${report}"
+if ((ours == 0)); then
+  die "nothing on ${token} was made by the enrollers"
+fi
+
+# --- ~/.ssh/config ---------------------------------------------------------------
+# Built up in ${work}, a copy, one handle at a time; written once, if asked.
+if ((${#cfg_files[@]})) && [[ -L ${config} && ! -e ${config} ]]; then
+  note "${config} is a link to $(readlink "${config}"), which does not exist (a checkout from before that file?), so the config is left alone"
+elif ((${#cfg_files[@]})); then
+  work="${tmp}/config"
+  if [[ -e ${config} ]]; then cat -- "${config}" >"${work}"; fi
+  default_user=$(id -un 2>/dev/null || true)
+  default_user=${default_user:-${USER:-}}
+  creport=""
+  crow() { creport+="$(printf '  %-9s %s' "$1" "$2")"$'\n'; }
+  for i in "${!cfg_files[@]}"; do
+    name=${cfg_names[$i]} file=${cfg_files[$i]}
+    if ssh_config_names "${work}" "${file}"; then
+      crow named "${file##*/}"
+      continue
+    fi
+    hosts=$(ssh_config_hosts_for "${work}" "${name}")
+    if [[ -n ${hosts} && ${hosts} != *$'\n'* ]]; then
+      ssh_config_add_ids "${work}" "${hosts}" "${file}" >"${work}.next"
+      mv -- "${work}.next" "${work}"
+      crow added "${file##*/} to Host ${hosts}"
+    elif [[ -n ${hosts} ]]; then
+      crow "left out" "${file##*/}: Host $(printf '%s' "${hosts}" | tr '\n' ' ') all match ${name}; add it to the right one by hand"
+    else
+      address=$(ask "No Host block for ${name}. Its address, for a new one (empty: leave ${name} out)")
+      if [[ -z ${address} ]]; then
+        crow "left out" "${file##*/}: no Host block for ${name}"
+        continue
+      fi
+      user=$(ask "User on ${name}" "${default_user}")
+      ssh_config_new_block "${work}" "${name}" "${address}" "${user}" "${file}" >"${work}.next"
+      mv -- "${work}.next" "${work}"
+      crow "new block" "Host ${name} (${user}@${address}) with ${file##*/}"
+    fi
+  done
+  printf '\n%s:\n%s' "${config}" "${creport}"
+
+  if [[ -e ${work} ]]; then
+    if [[ -e ${config} ]]; then
+      diff_out=$(diff -u "${config}" "${work}" || true)
+    else
+      diff_out=$(diff -u /dev/null "${work}" || true)
+    fi
+    if [[ -n ${diff_out} ]]; then
+      printf '\n%s\n' "${diff_out}"
+      if [[ $(ask "Write these changes to ${config}? (Y/n)" Y) =~ ^[Yy] ]]; then
+        cat -- "${work}" >"${config}" # through a link, never replacing it
+        chmod 600 "${config}"
+        if [[ -L ${config} ]]; then
+          printf '%s updated. It is a link to %s: commit the change there.\n' "${config}" "$(readlink "${config}")"
+        else
+          printf '%s updated.\n' "${config}"
+        fi
+      else
+        printf '%s left as it was.\n' "${config}"
+      fi
+    fi
+  fi
+fi
+
+printf '\nThe destinations need nothing: they still hold the public keys.\n'
+printf 'Swap in the other token and run this again.\n'
+if ((stale)); then
+  note "${stale} STALE, left as they were. If the token's credential replaced one, move that file and its .pub aside and run this again; if another token has the same label, re-enrol one of them under a new label."
+  exit 1
+fi

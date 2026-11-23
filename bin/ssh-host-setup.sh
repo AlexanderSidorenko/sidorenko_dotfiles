@@ -12,11 +12,11 @@
 #            what the YubiKey keys are for.
 #   yubikey  A resident ed25519-sk credential with verify-required, made inside
 #            one YubiKey: a touch plus the FIDO2 PIN on every use. Run once per
-#            token. The file in ~/.ssh is only a handle; `ssh-keygen -K`
-#            recreates it on any machine from the token, under OpenSSH's own
-#            name (id_ed25519_sk_rk_<name>-<label>), to be renamed to the one
-#            below. Installed with the verify-required option, so the server
-#            demands the PIN as well.
+#            token. The file in ~/.ssh is only a handle; ssh-restore-yk
+#            recreates it on any machine from the token, under the name below
+#            (`ssh-keygen -K` alone names it id_ed25519_sk_rk_<name>-<label>).
+#            Installed with the verify-required option, so the server demands
+#            the PIN as well.
 #   file     A plain key file on disk, as this script always made. For
 #            machines with no TPM.
 #

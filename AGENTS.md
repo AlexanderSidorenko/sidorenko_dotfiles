@@ -43,7 +43,7 @@ nvim/               — Neovim config (LazyVim-based, Lua)
 ranger/             — ranger file manager config
 claude/             — Claude Code config (settings.json, CLAUDE.md, skills/; symlinked into ~/.claude)
 bin/                — custom scripts (clip, mem, ram-health, ssh-host-setup.sh,
-                      ssh-remove-id, neovide, tmux-snapshot, tmux-restore,
+                      ssh-remove-id, ssh-restore-yk, neovide, tmux-snapshot, tmux-restore,
                       sweep-branches, audit-repos, tig-diff, and the PR review helpers:
                       pr-help, pr-prep, pr-draft, pr-diff, pr-threads)
 bin/lib/            — sourced helpers, not executables (meminfo.sh, ssh-keys.sh)
@@ -233,6 +233,7 @@ bash -n bin/mem && shellcheck -x bin/mem
 bash -n bin/ram-health && shellcheck -x bin/ram-health
 shellcheck bin/lib/meminfo.sh    # has a `shell=bash` directive, no shebang
 bash -n bin/ssh-host-setup.sh && shellcheck -x bin/ssh-host-setup.sh
+bash -n bin/ssh-restore-yk && shellcheck -x bin/ssh-restore-yk
 shellcheck bin/lib/ssh-keys.sh   # likewise
 ```
 
