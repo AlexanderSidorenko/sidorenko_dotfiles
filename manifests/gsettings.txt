@@ -50,8 +50,11 @@ org.gnome.desktop.wm.keybindings     switch-applications          ['<Super>Tab']
 org.gnome.desktop.wm.keybindings     switch-applications-backward ['<Shift><Super>Tab']
 org.gnome.shell.window-switcher      current-workspace-only       true
 
-# Alt+drag moves windows, Alt+right-drag resizes them.
+# Alt+drag moves windows, Alt+right-drag resizes them. The resize needs its
+# own key: without it mutter gives Alt+right-click the window menu, which pops
+# up over games that use that combination (Diablo II: Alt shows item labels).
 org.gnome.desktop.wm.preferences     mouse-button-modifier        '<Alt>'
+org.gnome.desktop.wm.preferences     resize-with-right-button     true
 
 # Free Super+N and the dock's N-hotkeys so the workspace bindings above win.
 # Cleared through 9, not 4, so raising num-workspaces later needs no edit here.
